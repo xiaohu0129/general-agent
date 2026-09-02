@@ -1,0 +1,20 @@
+# Python
+.venv/
+.idea/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+*.egg-info/
+tests/
+docs/
+.git/
+.env
+
+# 前端依赖与构建产物（源码 front/ 仍需进入前端镜像构建上下文）
+front/node_modules/
+front/dist/
+node_modules/
+dist/
+
+# 本地大产物存储（运行时生成，容器内需挂载持久卷）
+artifacts/

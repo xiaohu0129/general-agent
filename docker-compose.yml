@@ -1,0 +1,57 @@
+# general-agent 单机部署（单实例 + 外部 MySQL + 真实 LLM + Nginx 托管前端）
+# 用法：复制 .env.example 为 .env 并填写 -> docker compose up -d --build
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # ---- LLM（OpenAI 兼容端点，POST {base_url}/v1/chat/completions）----
+      AGENT_LLM__BASE_URL: "${LLM_BASE_URL:?需在 .env 设置 LLM_BASE_URL}"
+      AGENT_LLM__API_KEY: "${LLM_API_KEY:-}"
+      AGENT_LLM__MODEL: "${LLM_MODEL:-gpt-4o-mini}"
+      # ---- 外部 MySQL ----
+      AGENT_MYSQL__HOST: "${MYSQL_HOST:?需在 .env 设置 MYSQL_HOST}"
+      AGENT_MYSQL__PORT: "${MYSQL_PORT:-3306}"
+      AGENT_MYSQL__USER: "${MYSQL_USER:-root}"
+      AGENT_MYSQL__PASSWORD: "${MYSQL_PASSWORD:-}"
+      AGENT_MYSQL__DATABASE: "${MYSQL_DATABASE:-general_agent}"
+      # ---- 安全 / 登录态 ----
+      AGENT_SECURITY__AUTH_MODE: "session"
+      # 同源经 Nginx 访问；若用其他地址访问，把该源加入列表（JSON 数组）
+      AGENT_SECURITY__CORS_ORIGINS: '["http://localhost:8080","http://127.0.0.1:8080"]'
+      AGENT_SECURITY__SESSION__COOKIE_SECURE: "false"   # HTTP 部署；上 HTTPS 后改 true
+      AGENT_SECURITY__SESSION__TTL_HOURS: "168"
+      # ---- Redis（单实例留空即可；多实例才需要）----
+      AGENT_REDIS__URL: "${REDIS_URL:-}"
+      # ---- 观测/日志 ----
+      AGENT_OBSERVABILITY__ENABLED: "false"
+      AGENT_LOG__JSON_OUTPUT: "true"
+    expose:
+      - "9093"
+    extra_hosts:
+      # 允许用 host.docker.internal 访问宿主机上的 MySQL（Linux 上也生效）
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9093/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    volumes:
+      # 大产物外置存储（Tier2 blob）：持久化到卷，避免容器重建丢失工具产物
+      - agent-artifacts:/app/artifacts
+
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+
+volumes:
+  agent-artifacts:

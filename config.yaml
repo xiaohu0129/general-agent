@@ -1,0 +1,86 @@
+server:
+  host: "0.0.0.0"
+  port: 9093
+
+llm:
+  # OpenAI 兼容端点（POST {base_url}/v1/chat/completions）；留空则指向本地 stub（:9094）
+  base_url: ""
+  api_key: ""
+  model: "gpt-4o-mini"
+  timeout: 60.0
+
+agent:
+  # 工具调用轮数上限；超出触发 GraphRecursionError -> turn_end{finishReason:"max_tool_rounds"}
+  max_tool_rounds: 8
+  # 上下文 token 预算，超出则 trim（token 估算用 len(content)//4 粗估）
+  max_context_tokens: 24000
+  context_strategy: "trim"  # trim | trim_then_summarize（summarize 需额外 LLM 调用，预留）
+  summarize_threshold: 0.5  # 触发摘要的历史占比阈值（预留）
+  # 系统提示词，业务方可覆盖
+  system_prompt: "你是一个通用 AI 助手，可通过工具（Skill）帮助用户完成任务。需要调用工具时直接调用。"
+
+broker:
+  # 事件中枢 Broker + 心跳配置
+  ring_size: 256  # 每会话 ring buffer 容量（续传窗口）
+  sub_queue_size: 1024  # 订阅者队列容量（背压阈值）
+  heartbeat_interval: 15.0  # 心跳间隔，须 < 链路最短 idle 超时（网关 60s）
+
+security:
+  # 治理与安全
+  auth_mode: "session"  # disabled | api_key | jwt（预留） | session（Web 登录，Cookie+Session）
+  api_keys: []  # 合法 X-Api-Key，多个 key 共用（auth_mode=api_key 时校验）
+  allowed_envs: []  # env 白名单，空=不限制，如 ["dev","staging","prod"]
+  cors_origins:  # CORS 白名单；auth_mode=session 时禁止 ["*"]（与凭证不兼容）
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+  session:
+    ttl_hours: 168  # 登录态有效期（小时），滑动续期
+    cookie_secure: false  # 生产 HTTPS 下设 true（cookie 仅经 HTTPS 传输）
+    cookie_name: "ga_session"
+  web:
+    service: "web"  # Web 链路写入消息的 service 维度
+    env: "dev"  # Web 链路的 env 维度
+  rate_limit:
+    enabled: true
+    rps: 5.0  # 每秒补充令牌数
+    burst: 10  # 桶容量（允许突发）
+
+redis:
+  # 集群填 host:port 逗号分隔（如 h1:6379,h2:6379）；单机填 url 即可；留空=不启用（会话元数据/多实例 Broker 不生效）
+  nodes: ""
+  url: ""
+  ssl: false
+  password: ""
+
+mysql:
+  # 消息历史持久化（agent_message 表，启动惰性建表）；不填则按默认本机配置
+  host: "localhost"
+  port: 3306
+  user: "root"
+  password: ""
+  database: "general_agent"
+  pool_size: 5
+
+artifacts:
+  # 大产物外置存储（Tier2 blob）：超大工具结果/胖结果不内联 MySQL，写本地 blob 目录，消息行只存 head+引用
+  dir: "artifacts"          # 本地 blob 根目录（相对服务工作目录）；容器部署需挂持久卷
+  inline_threshold: 32768   # 内容字节数超过该值（32KB）则外置，否则内联 agent_message.content
+  head_chars: 2000          # 外置时消息行内保留的机械截断 head 字符数（不调 LLM）
+
+log:
+  level: "INFO"
+  json_output: true
+  redact_secrets: true  # 结构化日志脱敏
+
+observability:
+  enabled: true
+  service_name: "general-agent"
+  deployment_environment: "dev"  # agent 部署环境（非请求 env）
+  console: true  # dev 输出 console exporter；生产填 otlp.endpoint
+  otlp:
+    endpoint: ""  # OTLP 端点，如 http://localhost:4318；留空则不导出 OTLP，仅 console
+    protocol: "http"
+  traces:
+    sampling: 1.0  # 1.0 = 100%
+  metrics:
+    export_interval_ms: 10000

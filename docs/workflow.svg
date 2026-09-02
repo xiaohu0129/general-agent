@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="1560" viewBox="0 0 1180 1560" font-family="Microsoft YaHei, PingFang SC, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+    <style>
+      .box  { rx:10; ry:10; stroke-width:1.5; }
+      .t    { fill:#1f2937; font-size:15px; text-anchor:middle; }
+      .ts   { fill:#4b5563; font-size:12px; text-anchor:middle; }
+      .tw   { fill:#ffffff; font-size:14px; text-anchor:middle; font-weight:bold; }
+      .lane { fill-opacity:0.18; stroke-width:1.2; stroke-dasharray:6 4; }
+      .lane-label { font-size:13px; font-weight:bold; text-anchor:start; }
+      .edge { stroke:#555; stroke-width:1.5; fill:none; marker-end:url(#arrow); }
+      .edgel{ font-size:12px; fill:#374151; text-anchor:middle; }
+    </style>
+  </defs>
+
+  <!-- ===== 泳道背景 ===== -->
+  <rect x="30"   y="60" width="360" height="1470" class="lane" fill="#3b82f6" stroke="#3b82f6"/>
+  <rect x="410"  y="60" width="360" height="1470" class="lane" fill="#10b981" stroke="#10b981"/>
+  <rect x="790"  y="60" width="360" height="1470" class="lane" fill="#f59e0b" stroke="#f59e0b"/>
+
+  <text x="48"   y="85" class="lane-label" fill="#1d4ed8">openspec 阶段（管"做什么"）</text>
+  <text x="428"  y="85" class="lane-label" fill="#047857">superpowers 执行纪律（管"怎么做"）</text>
+  <text x="808"  y="85" class="lane-label" fill="#b45309">全局规则 / 用户交互</text>
+
+  <!-- ===== 起点 ===== -->
+  <ellipse cx="590" cy="120" rx="90" ry="28" fill="#111827"/>
+  <text x="590" y="126" class="tw">需求到来</text>
+  <path d="M590,148 L590,180" class="edge"/>
+
+  <!-- ===== 决策1：规模判断 ===== -->
+  <polygon points="590,180 730,235 590,290 450,235" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+  <text x="590" y="230" class="t">是新功能/大改动？</text>
+  <text x="590" y="250" class="ts">还是小修小补？</text>
+
+  <!-- 小修小补分支 -->
+  <path d="M730,235 L970,235" class="edge"/>
+  <text x="850" y="225" class="edgel">小改 / 修 bug</text>
+  <rect x="800" y="205" width="340" height="60" class="box" fill="#fef9c3" stroke="#ca8a04"/>
+  <text x="970" y="230" class="t">不走提案</text>
+  <text x="970" y="250" class="ts">直接进入 superpowers 调试 / TDD</text>
+
+  <!-- 新功能分支 -->
+  <path d="M590,290 L590,330" class="edge"/>
+  <text x="640" y="315" class="edgel">新功能 / 跨会话</text>
+
+  <!-- ===== openspec: explore ===== -->
+  <rect x="430" y="330" width="320" height="64" class="box" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="590" y="357" class="t">/opsx-explore</text>
+  <text x="590" y="378" class="ts">探索想法、澄清需求、调研问题</text>
+  <path d="M590,394 L590,430" class="edge"/>
+
+  <!-- ===== superpowers: brainstorming ===== -->
+  <rect x="430" y="430" width="320" height="64" class="box" fill="#d1fae5" stroke="#059669"/>
+  <text x="590" y="457" class="t">brainstorming（自动触发）</text>
+  <text x="590" y="478" class="ts">探讨边界条件、防护措施、验证方案</text>
+  <path d="M590,494 L590,530" class="edge"/>
+
+  <!-- ===== 全局规则：先方案后代码 ===== -->
+  <rect x="810" y="430" width="320" height="64" class="box" fill="#ffedd5" stroke="#ea580c"/>
+  <text x="970" y="457" class="t">全局规则④：先方案，后代码</text>
+  <text x="970" y="478" class="ts">方案不清不得进入实现</text>
+  <path d="M750,462 L810,462" class="edge"/>
+
+  <!-- ===== openspec: propose ===== -->
+  <rect x="430" y="530" width="320" height="70" class="box" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="590" y="558" class="t">/opsx-propose</text>
+  <text x="590" y="579" class="ts">生成 proposal + design +</text>
+  <text x="590" y="595" class="ts">specs（delta）+ tasks 完整文档</text>
+  <path d="M590,600 L590,636" class="edge"/>
+
+  <!-- ===== 用户评审提案 ===== -->
+  <polygon points="590,636 740,690 590,744 440,690" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+  <text x="590" y="685" class="t">用户评审提案</text>
+  <text x="590" y="705" class="ts">方案 / 边界 / 任务是否认可？</text>
+
+  <!-- 不认可：回退修改 -->
+  <path d="M440,690 L210,690 L210,562 L430,562" class="edge"/>
+  <text x="320" y="680" class="edgel">有异议</text>
+  <rect x="50" y="530" width="320" height="64" class="box" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="210" y="557" class="t">/opsx-update</text>
+  <text x="210" y="578" class="ts">修订提案文档，保持各工件一致</text>
+
+  <!-- 认可：进入 apply -->
+  <path d="M590,744 L590,780" class="edge"/>
+  <text x="645" y="770" class="edgel">认可</text>
+
+  <!-- ===== openspec: apply ===== -->
+  <rect x="430" y="780" width="320" height="70" class="box" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="590" y="808" class="t">/opsx-apply &lt;change&gt;</text>
+  <text x="590" y="829" class="ts">读 contextFiles → 显示进度</text>
+  <text x="590" y="845" class="ts">→ 逐任务实现循环</text>
+  <path d="M590,850 L590,886" class="edge"/>
+
+  <!-- ===== worktree ===== -->
+  <rect x="810" y="780" width="320" height="70" class="box" fill="#d1fae5" stroke="#059669"/>
+  <text x="970" y="808" class="t">using-git-worktrees</text>
+  <text x="970" y="829" class="ts">需要隔离时建独立工作区</text>
+  <text x="970" y="845" class="ts">不在 main 上直接动手</text>
+  <path d="M750,815 L810,815" class="edge"/>
+
+  <!-- ===== 循环开始：取一个任务 ===== -->
+  <rect x="430" y="886" width="320" height="56" class="box" fill="#e0e7ff" stroke="#4f46e5"/>
+  <text x="590" y="910" class="t">取下一个未完成任务</text>
+  <text x="590" y="929" class="ts">tasks.md 中 - [ ] 的项</text>
+  <path d="M590,942 L590,978" class="edge"/>
+
+  <!-- ===== TDD ===== -->
+  <rect x="430" y="978" width="320" height="70" class="box" fill="#d1fae5" stroke="#059669"/>
+  <text x="590" y="1006" class="t">test-driven-development</text>
+  <text x="590" y="1027" class="ts">先写失败测试 → 写实现</text>
+  <text x="590" y="1043" class="ts">→ 重构，保持最小改动</text>
+  <path d="M590,1048 L590,1084" class="edge"/>
+
+  <!-- ===== 决策：遇到问题？ ===== -->
+  <polygon points="590,1084 745,1138 590,1192 435,1138" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="590" y="1133" class="t">遇到 bug / 测试失败</text>
+  <text x="590" y="1153" class="ts">/ 需求不清 / 超出规格？</text>
+
+  <!-- 是：systematic-debugging -->
+  <path d="M435,1138 L210,1138" class="edge"/>
+  <text x="320" y="1128" class="edgel">是</text>
+  <rect x="50" y="1106" width="320" height="64" class="box" fill="#d1fae5" stroke="#059669"/>
+  <text x="210" y="1133" class="t">systematic-debugging</text>
+  <text x="210" y="1154" class="ts">先根因分析，再修复，禁止瞎改</text>
+
+  <!-- 暂停 & 问用户 -->
+  <path d="M210,1170 L210,1240 L810,1240" class="edge"/>
+  <rect x="810" y="1208" width="320" height="64" class="box" fill="#ffedd5" stroke="#ea580c"/>
+  <text x="970" y="1235" class="t">暂停并提问（不许猜）</text>
+  <text x="970" y="1256" class="ts">范围蔓延→提示 /opsx-update 更新文档</text>
+
+  <!-- 决策否：继续验证 -->
+  <path d="M590,1192 L590,1228" class="edge"/>
+  <text x="640" y="1218" class="edgel">否</text>
+
+  <!-- ===== verification ===== -->
+  <rect x="430" y="1228" width="320" height="64" class="box" fill="#d1fae5" stroke="#059669"/>
+  <text x="590" y="1255" class="t">verification-before-completion</text>
+  <text x="590" y="1276" class="ts">实际运行测试/构建，拿到证据</text>
+  <path d="M590,1292 L590,1328" class="edge"/>
+
+  <!-- ===== 勾选任务 + 文档同步 ===== -->
+  <rect x="430" y="1328" width="320" height="64" class="box" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="590" y="1355" class="t">勾选 - [x]，进入下一任务</text>
+  <text x="590" y="1376" class="ts">方案有调整→同步更新 openspec 文档⑤</text>
+
+  <rect x="810" y="1328" width="320" height="64" class="box" fill="#ffedd5" stroke="#ea580c"/>
+  <text x="970" y="1355" class="t">全局规则⑥：bug 记入错题文档</text>
+  <text x="970" y="1376" class="ts">现象 / 根因 / 修复方式 存入 docs/</text>
+  <path d="M750,1360 L810,1360" class="edge"/>
+
+  <!-- 回循环 -->
+  <path d="M430,1360 L370,1360 L370,914 L430,914" class="edge"/>
+  <text x="385" y="1140" class="edgel" transform="rotate(-90 385 1140)">还有任务</text>
+
+  <!-- ===== 全部任务完成 ===== -->
+  <path d="M590,1392 L590,1428" class="edge"/>
+  <text x="660" y="1418" class="edgel">全部任务完成</text>
+
+  <!-- ===== code review ===== -->
+  <rect x="430" y="1428" width="320" height="56" class="box" fill="#d1fae5" stroke="#059669"/>
+  <text x="590" y="1452" class="t">requesting-code-review</text>
+  <text x="590" y="1471" class="ts">审查通过后再集成</text>
+  <path d="M590,1484 L590,1512" class="edge"/>
+
+  <!-- ===== archive + 一致性校验 + finish ===== -->
+  <rect x="120" y="1500" width="300" height="52" class="box" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="270" y="1522" class="t">/opsx-archive</text>
+  <text x="270" y="1541" class="ts">归档变更，specs 转正</text>
+
+  <rect x="440" y="1500" width="300" height="52" class="box" fill="#ffedd5" stroke="#ea580c"/>
+  <text x="590" y="1522" class="t">全局规则⑦：一致性校验</text>
+  <text x="590" y="1541" class="ts">代码与文档不符→以代码为准更新</text>
+
+  <rect x="760" y="1500" width="300" height="52" class="box" fill="#d1fae5" stroke="#059669"/>
+  <text x="910" y="1522" class="t">finishing-a-development-branch</text>
+  <text x="910" y="1541" class="ts">验证测试 → 选择集成方式</text>
+
+  <path d="M500,1456 L270,1500" class="edge"/>
+  <path d="M590,1484 L590,1500" class="edge"/>
+  <path d="M680,1456 L910,1500" class="edge"/>
+
+  <!-- 小修小补分支汇入执行纪律（从黄色框到 TDD 区） -->
+  <path d="M970,265 L970,1013 L750,1013" class="edge" stroke-dasharray="5 4"/>
+
+  <!-- ===== 图例 ===== -->
+  <g transform="translate(48,1500)">
+  </g>
+  <g transform="translate(40,20)">
+    <rect x="0" y="0" width="16" height="16" rx="3" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="22" y="13" font-size="12" fill="#374151">openspec 命令/产物</text>
+    <rect x="170" y="0" width="16" height="16" rx="3" fill="#d1fae5" stroke="#059669"/>
+    <text x="192" y="13" font-size="12" fill="#374151">superpowers 技能（自动触发）</text>
+    <rect x="380" y="0" width="16" height="16" rx="3" fill="#ffedd5" stroke="#ea580c"/>
+    <text x="402" y="13" font-size="12" fill="#374151">全局规则 / 人工确认</text>
+    <polygon points="580,0 596,8 580,16 564,8" fill="#fef3c7" stroke="#d97706"/>
+    <text x="602" y="13" font-size="12" fill="#374151">决策点</text>
+  </g>
+</svg>

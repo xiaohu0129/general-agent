@@ -22,3 +22,27 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+.env
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# Frontend (front/)
+node_modules/
+front/dist/
+dist/
+*.tsbuildinfo
+
+# 大产物外置存储（Tier2 blob，本地目录；运行时生成，不入库）
+artifacts/
+
