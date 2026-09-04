@@ -7,7 +7,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import re
 import time
 from typing import Any
 from uuid import uuid4
@@ -20,6 +23,45 @@ app = FastAPI(title="openai-compatible llm stub")
 
 _USAGE = {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11}
 _TRIGGERS = ("工具", "调用", "create", "任务", "task")
+
+# ---------------- 确定性 stub embedding（哈希向量，无语义、仅供无外部依赖测试） ----------------
+_EMBED_DIM = 256
+_TOKEN_RE = re.compile(r"[0-9a-z]+|[\u4e00-\u9fff]", re.IGNORECASE)
+
+
+def _stub_embedding(text: str) -> list[float]:
+    """基于 token 哈希的确定性向量：相同文本同向量；共享 token 的文本余弦相近。"""
+    vec = [0.0] * _EMBED_DIM
+    tokens = _TOKEN_RE.findall(text.lower())
+    for tok in tokens:
+        digest = hashlib.md5(tok.encode("utf-8")).digest()
+        idx = int.from_bytes(digest[:4], "big") % _EMBED_DIM
+        sign = 1.0 if digest[4] & 1 else -1.0
+        vec[idx] += sign
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+class EmbeddingsBody(BaseModel):
+    model: str | None = None
+    input: str | list[str]
+
+
+@app.post("/v1/embeddings")
+async def embeddings(body: EmbeddingsBody):
+    texts = [body.input] if isinstance(body.input, str) else body.input
+    data = [
+        {"object": "embedding", "index": i, "embedding": _stub_embedding(t)}
+        for i, t in enumerate(texts)
+    ]
+    return JSONResponse(
+        {
+            "object": "list",
+            "data": data,
+            "model": body.model or "stub-embedding",
+            "usage": {"prompt_tokens": sum(len(t) for t in texts), "total_tokens": 0},
+        }
+    )
 
 
 def _tool_name(body: dict) -> str:

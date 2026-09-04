@@ -14,13 +14,63 @@ from .blob_store import LocalBlobStore
 from .broker import Broker
 from .chat_session_store import ChatSessionStore
 from .config import get_settings
+from .embedding import EmbeddingClient
 from .llm import OpenAICompatibleModel
-from .logging_setup import configure_logging
+from .logging_setup import configure_logging, get_logger
 from .message_store import MessageStore
 from .security import GovernanceError, TokenBucket
+from .skill_router import SkillRouter
+from .skill_router.index import SkillIndex
+from .skill_router.rules import RuleMatcher
 from .skills import build_registry
 from .turn_lock import TurnLockRegistry
 from .user_store import UserStore
+
+logger = get_logger(__name__)
+
+
+async def _setup_skill_router(app: FastAPI, settings) -> None:
+    """启动时构建 Skill 向量索引并装配 SkillRouter；routing.enabled=false 时不装配。"""
+    app.state.skill_router = None
+    app.state.routing_status = {"enabled": False, "index_ready": False, "mode": "off", "embedding_model": ""}
+    if not settings.routing.enabled:
+        return
+    registry = app.state.skill_registry
+    all_skills = registry.list_all()
+    emb_cfg = settings.embedding
+    embedder = EmbeddingClient(
+        emb_cfg.base_url,
+        model=emb_cfg.model,
+        api_key=emb_cfg.api_key,
+        timeout=emb_cfg.timeout,
+    )
+    # embedding 指向 stub（base_url 留空）时检索无语义，仅规则可用 -> 路由自动降级
+    is_stub = not emb_cfg.base_url
+    index = SkillIndex(embedder, cache_dir=emb_cfg.cache_dir, model_id=emb_cfg.model)
+    await index.build(all_skills)
+    mode = "rule+vector" if (index.ready and not is_stub) else ("rule-only" if index.ready else "degraded")
+    if is_stub or not index.ready:
+        logger.warning(
+            "skill_router_degraded",
+            reason="embedding_endpoint_is_stub" if is_stub else "index_build_failed",
+            hint="配置 embedding.base_url 为真实端点后向量检索才生效，当前仅规则/全量兜底",
+        )
+    router = SkillRouter(
+        index=index,
+        rule_matcher=RuleMatcher(settings.routing.rules),
+        llm=app.state.model,
+        embedder=embedder,
+        top_k=settings.routing.top_k,
+        score_threshold=settings.routing.score_threshold,
+        margin=settings.routing.margin,
+    )
+    app.state.skill_router = router
+    app.state.routing_status = {
+        "enabled": True,
+        "index_ready": bool(index.ready),
+        "mode": mode,
+        "embedding_model": emb_cfg.model,
+    }
 
 
 def create_app() -> FastAPI:
@@ -37,6 +87,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        await _setup_skill_router(app, settings)
         yield
         observability.shutdown_observability()
         # release the lazily-created MySQL pool, if any
@@ -97,6 +148,14 @@ def create_app() -> FastAPI:
     app.state.inflight = set()
     # 按 session_id 的轮次锁注册表：串行化同一会话的 producer，防止中断后重叠轮次导致历史交错
     app.state.turn_locks = TurnLockRegistry()
+    # Skill 意图路由（lifespan 启动时构建索引并装配；未跑 lifespan/关闭时为 None -> 全量工具）
+    app.state.skill_router = None
+    app.state.routing_status = {
+        "enabled": settings.routing.enabled,
+        "index_ready": False,
+        "mode": "off",
+        "embedding_model": settings.embedding.model,
+    }
 
     app.include_router(health.router)
     app.include_router(auth_routes.router)

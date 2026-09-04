@@ -67,6 +67,7 @@ class OpenAICompatibleModel(BaseChatModel):
     model: str = "gpt-4o-mini"
     api_key: str = ""
     timeout: float = 60.0
+    temperature: float = 0.0  # 默认 0：执行/路由 LLM 确定性优先
     transport: Any = None  # 注入 httpx transport（测试用 MockTransport）
 
     _bound_tools: list[dict] = PrivateAttr(default_factory=list)
@@ -103,6 +104,7 @@ class OpenAICompatibleModel(BaseChatModel):
             "model": self.model,
             "messages": [self._msg_to_dict(m) for m in messages],
             "stream": stream,
+            "temperature": self.temperature,
         }
         if self._bound_tools:
             body["tools"] = self._bound_tools

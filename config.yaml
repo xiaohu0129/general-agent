@@ -8,6 +8,31 @@ llm:
   api_key: ""
   model: "gpt-4o-mini"
   timeout: 60.0
+  temperature: 0  # 采样温度，0=确定性优先（执行 LLM 与路由兜底 LLM 均生效）
+
+embedding:
+  # Embedding 端点（OpenAI 兼容 POST {base_url}/v1/embeddings），Skill 意图路由向量检索用
+  # base_url 留空指向本地 stub（哈希向量无语义，路由自动降级为仅规则+全量兜底，启动 WARN）
+  # 方舟示例：base_url: "https://ark.cn-beijing.volces.com/api/coding/v3"，model 用实际 embedding 模型 id
+  base_url: ""
+  api_key: ""
+  model: "doubao-embedding-vision"
+  timeout: 30.0
+  cache_dir: ".skill_index_cache"  # Skill 向量索引本地缓存目录（按元数据哈希失效）
+
+routing:
+  # Skill 意图路由（规则前置 -> 向量检索 Tool RAG -> 低置信 LLM 选域 -> 用户澄清）
+  enabled: true
+  top_k: 20          # 向量检索返回的候选 Skill 数
+  score_threshold: 0.5  # top-1 余弦相似度高于该值才可能高置信收窄（按 embedding 模型调优）
+  margin: 0.1        # top-1 与 top-2 分差需大于该值才判定高置信；否则走 LLM 兜底/澄清
+  rules: []          # 规则前置：[{pattern: "正则", skills: ["skill_name"], category: "域标签"}]
+  # 示例：
+  # rules:
+  #   - pattern: "^/help|帮助"
+  #     skills: ["help_skill"]
+  #   - pattern: "工单|ticket"
+  #     category: "ticket"
 
 agent:
   # 工具调用轮数上限；超出触发 GraphRecursionError -> turn_end{finishReason:"max_tool_rounds"}

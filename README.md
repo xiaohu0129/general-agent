@@ -55,10 +55,23 @@ llm:
 
 ## 扩展业务 Skill
 
-1. 实现 `general_agent/skills/` 下的 `Skill` 子类（`name`/`description`/`args_schema`/`allowed_envs` + async `run(ctx, **kwargs)`）；
+1. 实现 `general_agent/skills/` 下的 `Skill` 子类：元数据 `name`/`description`/`args_schema`/`allowed_envs` + **`category`（技能域标签）+ `examples`（2~5 条典型用户说法，意图路由向量检索的主要语义来源）**，并实现 async `run(ctx, **kwargs)`；
 2. 在 `skills/__init__.py` 的 `build_registry()` 中 `register`；
 3. 业务客户端放入 `app.state.services`（dict），Skill 内通过 `ctx.services["key"]` 取用；
 4. 工具异常建议抛出带 `code` 属性的异常，会映射为 `tool_end` 的 `errorCode`。
+
+## 意图识别与 Skill 路由
+
+Skill 规模较大时，框架在 env 硬过滤后、建 Agent 前执行**意图路由**（可 `routing.enabled=false` 关闭退回全量平铺）：
+
+```
+规则路由（正则/命令，0 LLM 确定）-> 向量检索 Tool RAG（embedding 语义 top-k 收窄，主力）
+  -> 低置信 LLM 选域（structured output, temperature=0）-> 仍不明确则向用户澄清
+```
+
+- embedding 走 OpenAI 兼容 `POST {base_url}/v1/embeddings`，配置 `embedding.*`（方舟示例 `base_url=https://ark.cn-beijing.volces.com/api/coding/v3`、`model=doubao-embedding-vision`）；**留空时指向本地 stub（哈希向量无语义），路由自动降级为仅规则+全量兜底并启动 WARN**；
+- 向量索引内存实现（启动批量构建、按 Skill 元数据哈希本地缓存 `.skill_index_cache/`），不引入向量数据库；
+- 执行 LLM 与路由 LLM 固定 `llm.temperature=0` 保证同输入同选择；路由决策经 `intent_route` span、`agent.intent.route.*` metric 与审计日志可回放；`GET /health` 返回 `routing` 状态。
 
 ## 测试
 
@@ -77,3 +90,16 @@ llm:
 - [docs/错题本.md](docs/错题本.md)：迁移/调试踩坑记录（现象、根因、修复）
 - [docs/general-agent-arch.svg](docs/general-agent-arch.svg) / [docs/workflow.svg](docs/workflow.svg)：架构图与流程图
 - `openspec/specs/`：各能力的权威可测规格（chat-sse-protocol / conversation-broker / agent-loop / llm-adapter / skill-plugin / governance-security / web-auth-session / observability / deployment），可用 `openspec list --specs` 查看
+
+## 变更记录（OpenSpec Changes）
+
+正式变更（新功能/架构调整/涉及 spec）在 `openspec/changes/` 下以 change 管理（proposal/design/specs/tasks 四工件），完成归档后移入 `openspec/changes/archive/` 并合并进主规格。
+
+**进行中（`openspec/changes/`）：**
+
+- **skill-retrieval-routing**（已实现，待归档）：**意图识别**——数百 Skill 规模下的工具路由与渐进式加载。env 硬过滤后经"规则路由（正则逃生门）→ 向量检索 Tool RAG（embedding 语义 top-k 收窄，主力）→ 低置信 LLM 结构化选域 → 用户澄清"三级链路把模型可见工具从数百收窄到十几；Skill 元数据新增 `category`/`examples`；执行/兜底 LLM 固定 `temperature=0`、embedding 模型与索引版本固定以保证同输入同结果；新增 `intent_route` span 与路由 metric 可回放。详见 `openspec/changes/skill-retrieval-routing/`。
+
+**已归档（`openspec/changes/archive/`）：**
+
+- **baseline-system-specs**（2026-09-02）：基线系统规格固化——9 个能力规格共 49 条 requirements（SSE 协议、Broker、Agent Loop、LLM 适配、Skill 插件、治理安全、Web 认证、可观测、部署）。
+- **offload-large-artifacts**（2026-09-02）：大产物外置存储——本地 blob 存储（`BlobStore`）、消息按阈值分流（>32KB 外置，行内存 head + `content_ref` 引用）、历史回放 keyset 分页、产物下载端点（归属/路径安全）、会话删除级联清理 blob。

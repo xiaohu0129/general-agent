@@ -28,6 +28,13 @@
 - 执行层技能照常使用：test-driven-development（子代理先测后码）、
   systematic-debugging（遇 bug）、dispatching-parallel-agents（独立任务并行）。
 
+命名与文档约定：
+- change 目录名用**英文 kebab-case slug**（CLI 参数/归档目录名，避免中文编码风险）；
+  中文主题体现在工件正文。
+- `/opsx-propose` 完成工件后，**同步更新 `README.md` 的"变更记录（OpenSpec Changes）"
+  章节**：每个 change 一条（slug + 中文主题 + 主要作用），分"进行中/已归档"两组；
+  change 归档后条目移入"已归档"组。
+
 实现执行方式：以 subagent-driven-development 为主——tasks.md 的每个任务派
 独立 subagent 按 TDD 实现，主会话负责审查与串联；仅当任务 trivial 或强耦合
 无法拆分时，才由主线程直接实现。

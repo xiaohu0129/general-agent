@@ -232,6 +232,21 @@ FastAPI 依赖链 `governance_dep`（按 `auth_mode` 分流：`session` -> cooki
 - `general_agent/stub_llm.py`（:9094）：OpenAI 协议本地 stub，供无真实 LLM 端点时联调。
 - 业务接入：实现 `Skill` 子类 -> `build_registry()` 注册 -> 所需客户端放入 `app.state.services`；下游 REST 错误建议抛出带 `code` 属性的异常，以便映射 errorCode。
 
+### 5.3 意图路由落地（skill-retrieval-routing change）
+
+- `general_agent/embedding.py`：`EmbeddingClient`（httpx，OpenAI 兼容 `POST {base_url}/v1/embeddings`），base_url 留空指向 stub；错误复用 `llm.LLMError` 分类，api_key 仅内存。
+- `general_agent/skill_router/`：
+  - `rules.py`：`RuleMatcher`（启动期编译配置正则，顺序匹配第一条；目标 Skill 名/category 与 env 候选取交集，非法正则启动报错）。
+  - `index.py`：`SkillIndex`（索引文本聚合 category+name+description+examples；元数据 sha256 哈希；启动批量 embed + 本地缓存 `.skill_index_cache/skill_index.json`；纯 Python 归一化余弦 top-k；embed 失败且无缓存 -> `ready=False` 路由降级，不阻断启动）。
+  - `router.py`：`SkillRouter.route(message, candidates) -> RouteDecision(path/tools/clarify_text/details)`，path ∈ rule/vector/llm/chitchat/clarify/fallback/degraded；高置信条件 `top1≥score_threshold 且 top1−top2≥margin`，收窄集再按 `score_threshold*0.5` 分数下限截断；低置信调路由 LLM（structured JSON，类别 enum 从 category 清单动态派生，temperature=0）选域/chitchat/unknown；unknown -> clarify_text。
+- `api/chat.py`：`list_allowed(ctx)` -> `intent_route` span 内 `skill_router.route(...)`（记录路径/top-k/分差/工具集/模型与索引版本）-> `[s.to_tool(ctx) for s in decision.tools]` 建 agent；澄清走 `run_turn(direct_reply=...)`。
+- `runner.py`：`run_turn` 增 `direct_reply` 参数——非 None 时不建 ReAct 图，直接 yield turn_delta(文本) + 持久化 assistant + turn_end。
+- `app.py`：lifespan 启动 `_setup_skill_router`（建索引 + 装配 `app.state.skill_router` 与 `routing_status`；stub/未配置真实 embedding 时 WARN 且 mode=rule-only/degraded）；`routing.enabled=false` 不装配（chat 全量工具）。
+- `observability.py`：`record_intent_route(path, category)` -> `agent.intent.route.count`/`clarify.count`/`degrade.count` 低基数 metric；chat 侧审计 `audit("intent_route", ...)`。
+- `llm.py`：`OpenAICompatibleModel.temperature`（默认 0）注入请求体。
+- `api/health.py`：`/health` 增 `routing.{enabled,index_ready,mode,embedding_model}`。
+- 验证：`tests/test_skill_routing.py`（规则/索引缓存/六级路由路径/embedding 客户端/澄清 e2e/确定性复现/temperature/stub embedding/health/lifespan 装配）；conftest 默认 `AGENT_ROUTING__ENABLED=false`（避免 lifespan 连网络），路由测试自行注入 fake router。
+
 ### 5.2 M8 可观测性落地（文件级）
 
 - `general_agent/observability.py`：`XTraceIdPropagator`（复合 `TraceContext`+`Baggage`+`XTraceId`）；providers（`ParentBased(ALWAYS_ON)` + OTLP/console exporter）；7 项 metric instruments；`record_turn/llm/tool` + `record_span_error`；`severity_of` 映射；`setup_observability`/`instrument_app`/`shutdown_observability`。

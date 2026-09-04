@@ -142,6 +142,7 @@ async def run_turn(
     trace_id: str,
     user_message: str,
     max_tool_rounds: int = 8,
+    direct_reply: str | None = None,
 ) -> AsyncIterator[dict]:
     tracer = observability.get_tracer()
     start = time.monotonic()
@@ -167,6 +168,17 @@ async def run_turn(
         history = _trim_history(history, get_settings().agent.max_context_tokens)
         await message_store.append_message(service, env, user, session_id, turn_id, "user", user_message)
         history.append(HumanMessage(content=user_message))
+
+        # 路由澄清分支：不构建 ReAct 图、不调用业务工具，直接输出澄清文本作为 assistant 轮次。
+        if direct_reply is not None:
+            yield events.turn_delta(turn_id, trace_id, direct_reply)
+            with tracer.start_as_current_span("append_messages"):
+                await message_store.append_message(
+                    service, env, user, session_id, turn_id, "assistant", direct_reply
+                )
+            observability.record_turn((time.monotonic() - start) * 1000, events.FINISH_REASON_STOP)
+            yield events.turn_end(turn_id, trace_id, events.FINISH_REASON_STOP)
+            return
 
         recursion_limit = max_tool_rounds * 2 + 1  # 每轮约 2 步（agent+tools）
         new_messages: list[BaseMessage] = []

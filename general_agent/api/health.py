@@ -1,7 +1,7 @@
 """健康检查：服务存活 + 配置可读 + Redis 连通性探测 + OTel 状态。"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from .. import __version__, observability
 from ..config import get_settings
@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 
 
 @router.get("/health")
-async def health() -> dict:
+async def health(request: Request) -> dict:
     settings = get_settings()
     redis_status = "not_configured"
     if settings.redis.nodes or settings.redis.url:
@@ -31,6 +31,7 @@ async def health() -> dict:
             "otlp_endpoint": settings.observability.otlp.endpoint or "",
             "initialized": observability.is_enabled(),
         },
+        "routing": getattr(request.app.state, "routing_status", {}),
     }
 
 

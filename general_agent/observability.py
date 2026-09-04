@@ -183,6 +183,9 @@ _tool_duration = None
 _tool_calls = None
 _tool_errors = None
 _rate_limit_hits = None
+_intent_route = None
+_intent_clarify = None
+_intent_degrade = None
 
 
 def setup_observability(settings) -> None:
@@ -190,6 +193,7 @@ def setup_observability(settings) -> None:
     global _turn_duration, _llm_duration, _llm_tokens, _llm_errors
     global _tool_duration, _tool_calls, _tool_errors
     global _rate_limit_hits
+    global _intent_route, _intent_clarify, _intent_degrade
     if _initialized:
         return
     _setup_propagator()
@@ -248,6 +252,9 @@ def setup_observability(settings) -> None:
     _tool_calls = meter.create_counter("agent.tool.calls", description="Tool calls by status")
     _tool_errors = meter.create_counter("agent.tool.errors", description="Tool errors by code")
     _rate_limit_hits = meter.create_counter("agent.rate_limit.hits", description="Rate limit hits by env")
+    _intent_route = meter.create_counter("agent.intent.route.count", description="Skill routing decisions by path")
+    _intent_clarify = meter.create_counter("agent.intent.clarify.count", description="Routing clarify fallbacks")
+    _intent_degrade = meter.create_counter("agent.intent.degrade.count", description="Routing degraded/fallback decisions")
 
     # httpx 出站自动 instrumentation（注入 traceparent 给 LLM / 业务下游）
     try:
@@ -340,3 +347,14 @@ def record_tool(tool_name: str, duration_ms: float, *, status: str, error_code: 
 def record_rate_limit_hit(env: str) -> None:
     if _rate_limit_hits is not None:
         _rate_limit_hits.add(1, {"env": env or "dev"})
+
+
+def record_intent_route(path: str, *, category: str = "") -> None:
+    """记录 Skill 路由决策：path 为 rule/vector/llm/chitchat/clarify/fallback/degraded（低基数）。"""
+    env = current_env()
+    if _intent_route is not None:
+        _intent_route.add(1, {"env": env, "path": path, "category": category or "none"})
+    if path == "clarify" and _intent_clarify is not None:
+        _intent_clarify.add(1, {"env": env})
+    if path in ("fallback", "degraded") and _intent_degrade is not None:
+        _intent_degrade.add(1, {"env": env, "path": path})

@@ -12,6 +12,9 @@ os.environ.setdefault("AGENT_OBSERVABILITY__ENABLED", "false")
 os.environ.setdefault("AGENT_SECURITY__AUTH_MODE", "disabled")
 os.environ.setdefault("AGENT_SECURITY__RATE_LIMIT__ENABLED", "false")
 os.environ.setdefault("AGENT_BROKER__HEARTBEAT_INTERVAL", "0.5")
+# 路由索引构建需访问 embedding 端点；单测默认关闭（避免 lifespan 连网络），
+# 路由专项测试自行构造 SkillRouter 注入 app.state.skill_router。
+os.environ.setdefault("AGENT_ROUTING__ENABLED", "false")
 
 import httpx
 from fastapi.testclient import TestClient

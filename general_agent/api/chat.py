@@ -20,7 +20,7 @@ from ..broker import Broker
 from ..config import get_settings
 from ..logging_setup import get_logger
 from ..runner import run_turn
-from ..security import GovernanceError, Identity, governance_dep
+from ..security import GovernanceError, Identity, audit, governance_dep
 from ..session import SessionStore, session_key
 from ..skills import SkillContext
 
@@ -57,6 +57,7 @@ async def _produce(
     trace_id: str,
     user_message: str,
     max_tool_rounds: int,
+    direct_reply: str | None = None,
 ) -> None:
     """Producer：消费 run_turn 事件流 -> broker.distribute（分配 eventSeq + 入 ring + fan-out）。
 
@@ -85,6 +86,7 @@ async def _produce(
                 trace_id=trace_id,
                 user_message=user_message,
                 max_tool_rounds=max_tool_rounds,
+                direct_reply=direct_reply,
             ):
                 await broker.distribute(session_id, ev)
     except Exception as exc:
@@ -142,15 +144,44 @@ async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(
         except Exception as exc:
             logger.warning("save_session_failed", error=str(exc), sessionId=session_id)
 
-    # 按 env 过滤 Skill -> 重建 agent（每请求重建图，动态加载）
+    # 按 env 过滤 Skill -> Skill 意图路由（规则/向量/LLM 兜底/澄清）收窄工具集 -> 每请求重建 agent
     ctx = SkillContext(
         env=env,
         user=user,
         session_id=session_id,
         services=dict(request.app.state.services),
     )
-    tools = request.app.state.skill_registry.get_tools(ctx)
+    candidates = request.app.state.skill_registry.list_allowed(ctx)
+    decision = None
+    skill_router = getattr(request.app.state, "skill_router", None)
+    if skill_router is not None:
+        tracer = observability.get_tracer()
+        with tracer.start_as_current_span("intent_route") as span:
+            decision = await skill_router.route(req.message, candidates)
+            span.set_attribute("route_path", decision.path)
+            span.set_attribute("route_candidate_count", len(candidates))
+            span.set_attribute("route_tool_count", len(decision.tools))
+            span.set_attribute("route_tools", ",".join(s.name for s in decision.tools))
+            for k, v in decision.details.items():
+                if isinstance(v, (str, int, float, bool)):
+                    span.set_attribute(f"route.{k}", v)
+        observability.record_intent_route(
+            decision.path, category=str(decision.details.get("llm_category") or "")
+        )
+        audit(
+            "intent_route",
+            actor=user,
+            env=env,
+            resource=decision.path,
+            trace_id=trace_id,
+            tools=[s.name for s in decision.tools],
+            **{k: v for k, v in decision.details.items() if isinstance(v, (str, int, float, bool))},
+        )
+        tools = [s.to_tool(ctx) for s in decision.tools]
+    else:
+        tools = [s.to_tool(ctx) for s in candidates]
     agent = build_agent(request.app.state.model, tools, system_prompt=settings.agent.system_prompt)
+    direct_reply = decision.clarify_text if decision is not None else None
 
     broker: Broker = request.app.state.broker
     # 先订阅再 spawn producer，确保 turn_start 不丢
@@ -172,6 +203,7 @@ async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(
             trace_id=trace_id,
             user_message=req.message,
             max_tool_rounds=request.app.state.max_tool_rounds,
+            direct_reply=direct_reply,
         )
     )
     # 同步持有 task 引用，防止 chat 返回后 producer 被 GC（asyncio 官方建议）；

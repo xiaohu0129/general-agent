@@ -26,6 +26,36 @@ class LLMSettings(BaseModel):
     api_key: str = ""
     model: str = "gpt-4o-mini"
     timeout: float = 60.0
+    # 采样温度：默认 0（确定性优先，执行 LLM 与路由兜底 LLM 均生效）
+    temperature: float = 0.0
+
+
+class RouteRule(BaseModel):
+    """规则路由条目：正则/命令前缀命中 -> 目标 Skill（按名或按 category）。"""
+
+    pattern: str  # 正则表达式，作用于用户消息文本（search 匹配）
+    skills: list[str] = []  # 目标 Skill 名集合（与 category 二选一或并存，取并集）
+    category: str = ""  # 目标技能域
+
+
+class RoutingSettings(BaseModel):
+    """Skill 意图路由（规则 -> 向量检索 -> LLM 兜底 -> 澄清）。"""
+
+    enabled: bool = True
+    top_k: int = 20  # 向量检索返回的候选 Skill 数
+    score_threshold: float = 0.5  # top-1 余弦相似度高于该值才可能高置信收窄（按 embedding 模型调优）
+    margin: float = 0.1  # top-1 与 top-2 分差需大于该值才判定高置信
+    rules: list[RouteRule] = []
+
+
+class EmbeddingSettings(BaseModel):
+    """Embedding 端点（OpenAI 兼容 POST {base_url}/v1/embeddings）；留空指向本地 stub。"""
+
+    base_url: str = ""
+    api_key: str = ""
+    model: str = "doubao-embedding-vision"  # 部署时按实际 embedding 模型 id 覆盖
+    timeout: float = 30.0
+    cache_dir: str = ".skill_index_cache"  # Skill 向量索引本地缓存目录
 
 
 class AgentSettings(BaseModel):
@@ -141,6 +171,8 @@ class Settings(BaseSettings):
 
     server: ServerSettings = ServerSettings()
     llm: LLMSettings = LLMSettings()
+    routing: RoutingSettings = RoutingSettings()
+    embedding: EmbeddingSettings = EmbeddingSettings()
     agent: AgentSettings = AgentSettings()
     broker: BrokerSettings = BrokerSettings()
     security: SecuritySettings = SecuritySettings()

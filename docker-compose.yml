@@ -11,6 +11,10 @@ services:
       AGENT_LLM__BASE_URL: "${LLM_BASE_URL:?需在 .env 设置 LLM_BASE_URL}"
       AGENT_LLM__API_KEY: "${LLM_API_KEY:-}"
       AGENT_LLM__MODEL: "${LLM_MODEL:-gpt-4o-mini}"
+      # ---- Embedding（Skill 意图路由向量检索；留空则路由降级为仅规则+全量兜底）----
+      AGENT_EMBEDDING__BASE_URL: "${EMBEDDING_BASE_URL:-}"
+      AGENT_EMBEDDING__API_KEY: "${EMBEDDING_API_KEY:-}"
+      AGENT_EMBEDDING__MODEL: "${EMBEDDING_MODEL:-doubao-embedding-vision}"
       # ---- 外部 MySQL ----
       AGENT_MYSQL__HOST: "${MYSQL_HOST:?需在 .env 设置 MYSQL_HOST}"
       AGENT_MYSQL__PORT: "${MYSQL_PORT:-3306}"

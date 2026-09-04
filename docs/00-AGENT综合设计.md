@@ -315,6 +315,25 @@ sequenceDiagram
 
 **工具异常不杀轮次**：`ToolNode` 开启 `handle_tool_errors`，工具抛异常（携带 `code` 属性时取其作为 errorCode，否则 INTERNAL）时被捕获转为 `status=error` 的 ToolMessage 供 LLM 反应并继续该 turn（不崩溃）；runner 由 `on_tool_error` 产出 `tool_end{status:error, errorCode}`，错误 ToolMessage 从 tools 节点 `on_chain_end` 捕获并持久化。
 
+### 6.3 意图识别与 Skill 路由（渐进式加载）
+
+Skill 规模上量（数百）时，平铺全部工具会使模型选择质量下降且决策黑盒。框架在 env 硬过滤后、建 Agent 前插入**意图路由层**（`routing.enabled` 可关，关闭即退回全量平铺），按确定性分级收窄工具集：
+
+```
+[0] env 硬过滤（allowed_envs，确定性，不可被路由绕过）
+[1] 规则路由：配置化正则/命令命中 -> 确定 Skill 集合（0 LLM，可复现，逃生门）
+[2] 向量检索 Tool RAG（主力）：embed(Skill description+examples) 建索引（启动批量构建、
+    元数据哈希本地缓存、内存余弦），embed(用户消息) 检索 top-k；top1 过阈值且分差明确 -> 收窄
+[3] 低置信兜底：结构化输出路由 LLM（temperature=0）从 category 清单选域；仍不明确 -> 向用户澄清
+    （普通文本轮次，不建 ReAct 图、不调工具）
+```
+
+- **Skill 元数据升级**：基类新增 `category`（域标签）与 `examples`（2~5 条示例话语，向量检索语义主体）；缺 examples 以 description 兜底并在路由记录标注。
+- **embedding**：OpenAI 兼容 `POST {base_url}/v1/embeddings`（`embedding.*` 配置，方舟 `doubao-embedding-vision`）；留空指向本地 stub（确定性哈希向量，无语义），路由自动降级为仅规则+全量兜底并启动 WARN；stub_llm 提供 `/v1/embeddings`。
+- **确定性**：规则数学确定；向量检索固定 embedding 模型 id + 索引版本（落 span）；执行/路由 LLM 固定 `llm.temperature=0`；不追求回复文本逐字一致。
+- **可观测**：`intent_route` span（路径/top-k 分数/分差/最终工具集/模型与索引版本）+ `agent.intent.route.*` 低基数 metric + 审计日志，支持离线回放与"检索推荐 vs 模型实际选择"比对。
+- **非目标**：不引入向量数据库（几百向量内存计算足够）；不做 supervisor 多子代理（category 分组为其预留）；模型执行中主动换批的 `search_skills` 元工具为二期（数据驱动）。
+
 ---
 
 ## 七、可观测性（M8）

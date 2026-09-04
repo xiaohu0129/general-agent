@@ -34,12 +34,14 @@ class SkillContext:
 
 
 class Skill:
-    """Skill 基类。子类定义 name/description/args_schema/allowed_envs 并实现 run。"""
+    """Skill 基类。子类定义 name/description/args_schema/allowed_envs/category/examples 并实现 run。"""
 
     name: str = ""
     description: str = ""
     args_schema: type[BaseModel] | None = None
     allowed_envs: list[str] | None = None  # None=全部环境可用；列表=仅这些 env
+    category: str = ""  # 技能域标签（用于向量检索元数据过滤与兜底 LLM 选域）
+    examples: list[str] = []  # 2~5 条典型用户说法，作为向量检索的主要语义来源
 
     async def run(self, ctx: SkillContext, **kwargs) -> Any:  # noqa: D401
         raise NotImplementedError
@@ -94,3 +96,11 @@ class SkillRegistry:
 
     def get_tools(self, ctx: SkillContext) -> list[BaseTool]:
         return [s.to_tool(ctx) for s in self._skills if s.allowed(ctx.env)]
+
+    def list_allowed(self, ctx: SkillContext) -> list[Skill]:
+        """返回当前 env 可用的 Skill 对象（供路由层检索/收窄后再 to_tool）。"""
+        return [s for s in self._skills if s.allowed(ctx.env)]
+
+    def list_all(self) -> list[Skill]:
+        """返回全部已注册 Skill（跨 env，供启动时构建向量索引）。"""
+        return list(self._skills)
