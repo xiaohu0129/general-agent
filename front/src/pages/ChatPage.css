@@ -44,6 +44,17 @@
   cursor: default;
 }
 
+.gap-notice {
+  margin: 12px 0 0;
+  padding: 6px 12px;
+  font-size: 13px;
+  text-align: center;
+  color: var(--text-3);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
 .chat-composer {
   flex-shrink: 0;
   background: linear-gradient(to top, var(--bg) 70%, rgba(247, 248, 250, 0));

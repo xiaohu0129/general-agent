@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 900" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="b3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+    <marker id="bR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2e9e5b"/>
+    </marker>
+  </defs>
+
+  <text x="550" y="32" text-anchor="middle" font-size="19" font-weight="700" fill="#1f2329">缺陷3：澄清选项的「写进库 / 读回来 / 回写已选 / 回放」存储链断了 5 处</text>
+
+  <!-- ============ 轮 N：澄清 ============ -->
+  <rect x="30" y="56" width="1040" height="150" rx="10" fill="#f7f9ff" stroke="#4d6bfe" stroke-width="1.4"/>
+  <text x="50" y="80" font-size="14" font-weight="700" fill="#2b3a67">轮 N（路由低置信 → 澄清）</text>
+
+  <rect x="50" y="94" width="250" height="92" rx="8" fill="#fff" stroke="#4d6bfe" stroke-width="1.4"/>
+  <text x="175" y="118" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1f2329">chat 同步段 route()</text>
+  <text x="175" y="140" text-anchor="middle" font-size="12" fill="#374151">decision.clarify_text</text>
+  <text x="175" y="158" text-anchor="middle" font-size="12" fill="#2e9e5b" font-weight="700">decision.clarify_options</text>
+  <text x="175" y="176" text-anchor="middle" font-size="11.5" fill="#6b7280">[{label, value:category:/skill:}]</text>
+
+  <line x1="300" y1="140" x2="352" y2="140" stroke="#6b7280" stroke-width="1.6" marker-end="url(#b3)"/>
+
+  <rect x="354" y="100" width="236" height="80" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.6"/>
+  <text x="472" y="124" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">断裂 B：options 传不下去</text>
+  <text x="472" y="146" text-anchor="middle" font-size="11.5" fill="#374151">chat.py:184 只取 clarify_text</text>
+  <text x="472" y="164" text-anchor="middle" font-size="11.5" fill="#374151">run_turn(direct_reply=str)</text>
+  <text x="472" y="180" text-anchor="middle" font-size="11.5" fill="#c0392b">runner 拿不到 options/categories</text>
+
+  <line x1="590" y1="140" x2="642" y2="140" stroke="#6b7280" stroke-width="1.6" marker-end="url(#b3)"/>
+
+  <rect x="644" y="100" width="236" height="80" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.6"/>
+  <text x="762" y="124" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">断裂 B+F：写不进 meta</text>
+  <text x="762" y="146" text-anchor="middle" font-size="11.5" fill="#374151">append_message 无 meta 参数</text>
+  <text x="762" y="164" text-anchor="middle" font-size="11.5" fill="#374151">表无 meta 列（DDL/ALTER 缺）</text>
+  <text x="762" y="180" text-anchor="middle" font-size="11.5" fill="#c0392b">澄清行只存了纯文本</text>
+
+  <line x1="880" y1="140" x2="932" y2="140" stroke="#6b7280" stroke-width="1.6" marker-end="url(#b3)"/>
+  <rect x="934" y="106" width="120" height="68" rx="8" fill="#fff" stroke="#9aa0a6" stroke-width="1.3"/>
+  <text x="994" y="134" text-anchor="middle" font-size="12" fill="#1f2329">agent_message</text>
+  <text x="994" y="154" text-anchor="middle" font-size="12" fill="#c0392b" font-weight="700">meta 列 ✗</text>
+
+  <!-- ============ 表示意 ============ -->
+  <rect x="50" y="226" width="1000" height="74" rx="8" fill="#fafafa" stroke="#9aa0a6" stroke-width="1.2"/>
+  <text x="70" y="250" font-size="12.5" font-weight="700" fill="#1f2329">agent_message 表（现状列）：</text>
+  <text x="70" y="272" font-size="11.5" fill="#374151" font-family="Consolas,monospace">id · service · env · user_id · session_id · turn_id · role · content · tool_calls · tool_call_id · content_ref/size/kind · created_at</text>
+  <text x="70" y="292" font-size="11.5" fill="#c0392b" font-weight="700" font-family="Consolas,monospace">→ 缺 meta 列；且 load_messages 的 SELECT 只取 role,content,tool_calls,tool_call_id（连 turn_id 都没取回）</text>
+
+  <!-- ============ 轮 N+1：点选 ============ -->
+  <rect x="30" y="318" width="1040" height="200" rx="10" fill="#f0faf4" stroke="#2e9e5b" stroke-width="1.4"/>
+  <text x="50" y="342" font-size="14" font-weight="700" fill="#1f6b41">轮 N+1（用户点选「退款」→ message=label, clarify_selection.value=category:refund）</text>
+
+  <rect x="50" y="358" width="300" height="142" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.6"/>
+  <text x="200" y="382" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">断裂 A：读不到上轮澄清</text>
+  <text x="66" y="406" font-size="11.5" fill="#374151">chat 同步段要 load 历史、据末条</text>
+  <text x="66" y="424" font-size="11.5" fill="#374151">assistant 的 meta 构造 prev_clarify</text>
+  <text x="66" y="448" font-size="11.5" fill="#c0392b" font-weight="700">但 load_messages SELECT 无 meta</text>
+  <text x="66" y="466" font-size="11.5" fill="#c0392b" font-weight="700">→ prev_clarify 恒为 None</text>
+  <text x="66" y="490" font-size="11.5" fill="#374151">（D3 文本闭环 / D11 校验 options 全落空）</text>
+
+  <line x1="350" y1="429" x2="402" y2="429" stroke="#6b7280" stroke-width="1.6" marker-end="url(#b3)"/>
+
+  <rect x="404" y="372" width="300" height="114" rx="8" fill="#fff" stroke="#2e9e5b" stroke-width="1.4"/>
+  <text x="554" y="396" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1f6b41">识别 selection → 确定性收窄</text>
+  <text x="420" y="420" font-size="11.5" fill="#374151">value 命中 prev_clarify.options</text>
+  <text x="420" y="438" font-size="11.5" fill="#374151">→ 按 category:/skill: 前缀收窄</text>
+  <text x="420" y="462" font-size="11.5" fill="#374151">收窄后本轮 user 行 content=label</text>
+  <text x="420" y="480" font-size="11.5" fill="#6b7280">（value 不进 content）</text>
+
+  <line x1="704" y1="429" x2="756" y2="429" stroke="#6b7280" stroke-width="1.6" marker-end="url(#b3)"/>
+
+  <rect x="758" y="358" width="296" height="142" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.6"/>
+  <text x="906" y="382" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">断裂 C：selected 回写无门</text>
+  <text x="774" y="406" font-size="11.5" fill="#374151">要把上轮澄清行 meta.selected 置值</text>
+  <text x="774" y="428" font-size="11.5" fill="#c0392b" font-weight="700">① MessageStore 无 UPDATE 方法（只有 INSERT）</text>
+  <text x="774" y="450" font-size="11.5" fill="#c0392b" font-weight="700">② 定位不到上轮行：SELECT 没取回 turn_id</text>
+  <text x="774" y="472" font-size="11.5" fill="#374151">回写须按 归属键 + turn_id 定位并合并 meta</text>
+  <text x="774" y="492" font-size="11.5" fill="#6b7280">（不能覆盖已有 options；NULL meta 兼容）</text>
+
+  <!-- ============ 刷新回放 ============ -->
+  <rect x="30" y="534" width="1040" height="118" rx="10" fill="#fff8e8" stroke="#f5a623" stroke-width="1.4"/>
+  <text x="50" y="558" font-size="14" font-weight="700" fill="#8a5b00">刷新 / 换设备：GET /sessions/{id}/messages 历史回放</text>
+  <rect x="50" y="572" width="470" height="66" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.5"/>
+  <text x="285" y="596" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">断裂 D：回放 DTO 没有 options/selected</text>
+  <text x="66" y="618" font-size="11.5" fill="#374151">load_web_messages SELECT 列无 meta；DTO（:231）无 options/selected 字段</text>
+  <text x="66" y="634" font-size="11.5" fill="#c0392b">→ 前端刷新后澄清卡片退化为纯文本、已选态丢失</text>
+  <rect x="550" y="572" width="500" height="66" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.5"/>
+  <text x="800" y="596" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">断裂 E：测试替身 FakeStore 不支持</text>
+  <text x="566" y="618" font-size="11.5" fill="#374151">conftest FakeStore 存的行没有 turn_id / meta 键，</text>
+  <text x="566" y="634" font-size="11.5" fill="#374151">也无 update 方法 → e2e 一写一读就撞 AttributeError/断言失败</text>
+
+  <!-- ============ 需要的存储改动 ============ -->
+  <rect x="30" y="668" width="1040" height="210" rx="10" fill="#eef1ff" stroke="#4d6bfe" stroke-width="1.6"/>
+  <text x="50" y="694" font-size="14" font-weight="700" fill="#2b3a67">要补齐的 6 项存储能力（design D3 / tasks 4.x 需写明，否则实现必返工）</text>
+
+  <text x="56" y="722" font-size="12.5" fill="#1f2329"><tspan font-weight="700" fill="#2b3a67">① DDL/迁移</tspan>：SCHEMA_DDL 建表直接加 <tspan font-family="Consolas,monospace">meta JSON NULL</tspan>（新库一步到位）；init_schema 查 information_schema 对存量库惰性 ALTER 补列。</text>
+  <text x="56" y="748" font-size="12.5" fill="#1f2329"><tspan font-weight="700" fill="#2b3a67">② 写 options</tspan>：append_message 增 <tspan font-family="Consolas,monospace">meta</tspan> 参数 + INSERT 加列；run_turn 增参接收 clarify_meta（chat 把 decision 的 categories/options 经 _produce 透传，不只传 clarify_text）。</text>
+  <text x="56" y="774" font-size="12.5" fill="#1f2329"><tspan font-weight="700" fill="#2b3a67">③ 读 prev_clarify</tspan>：load_messages SELECT 加 <tspan font-family="Consolas,monospace">meta, turn_id</tspan>（喂图的 _row_to_message 忽略多余键，安全）；chat 据末条 assistant meta.kind=clarify 构造 prev_clarify 并记下其 turn_id。</text>
+  <text x="56" y="800" font-size="12.5" fill="#1f2329"><tspan font-weight="700" fill="#2b3a67">④ 回写 selected</tspan>：新增 <tspan font-family="Consolas,monospace">update_clarify_selected(归属键, turn_id, selected)</tspan>——按 service/env/user/session_id + turn_id 定位上轮澄清行，合并写 meta.selected（JSON_SET 或读-改-写，兼容 NULL/已有 options）；选项闭环轮 chat 同步段调用。</text>
+  <text x="56" y="826" font-size="12.5" fill="#1f2329"><tspan font-weight="700" fill="#2b3a67">⑤ 历史回放</tspan>：load_web_messages SELECT 加 meta，DTO 透出 <tspan font-family="Consolas,monospace">options</tspan> / <tspan font-family="Consolas,monospace">selected</tspan>（从 meta 解出，存量 NULL 行不报错）。</text>
+  <text x="56" y="852" font-size="12.5" fill="#1f2329"><tspan font-weight="700" fill="#2b3a67">⑥ 测试替身</tspan>：FakeStore 行补存 turn_id/meta、load_messages 返回含之、load_web_messages DTO 透 options/selected、补 update 方法的内存实现（单列一条 task，避免子代理漏）。</text>
+  <text x="56" y="874" font-size="11.5" fill="#6b7280">注：④ 的回写发生在「点选轮」的 chat 同步段（此时已能从 ③ 读到上轮澄清行的 turn_id）；归属 WHERE 与现有查询一致，防越权。</text>
+</svg>

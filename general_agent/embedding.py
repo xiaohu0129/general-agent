@@ -24,12 +24,14 @@ class EmbeddingClient:
         api_key: str = "",
         timeout: float = 30.0,
         transport: Any = None,
+        batch_size: int = 64,
     ) -> None:
         self.base_url = (base_url or _STUB_BASE).rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
         self.transport = transport
+        self.batch_size = batch_size
 
     def _endpoint(self) -> str:
         return f"{self.base_url}/v1/embeddings"
@@ -43,13 +45,12 @@ class EmbeddingClient:
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        body = {"model": self.model, "input": texts}
+        results: list[list[float]] = []
         try:
             async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout) as client:
-                r = await client.post(self._endpoint(), json=body, headers=self._headers())
-                if r.is_error:
-                    raise self._http_error(r)
-                data = r.json()
+                for start in range(0, len(texts), self.batch_size):
+                    batch = texts[start : start + self.batch_size]
+                    results.extend(await self._embed_batch(client, batch))
         except LLMError:
             raise
         except Exception as exc:
@@ -60,11 +61,20 @@ class EmbeddingClient:
                     "TIMEOUT" if isinstance(exc, httpx.TimeoutException) else "INTERNAL"
                 )
             raise LLMError(code, str(exc)) from exc
+        return results
+
+    async def _embed_batch(self, client: httpx.AsyncClient, batch: list[str]) -> list[list[float]]:
+        """单批请求并返回与 batch 同序的向量；HTTP/解析错误沿用既有分类抛出。"""
+        body = {"model": self.model, "input": batch}
+        r = await client.post(self._endpoint(), json=body, headers=self._headers())
+        if r.is_error:
+            raise self._http_error(r)
+        data = r.json()
         items = data.get("data") or []
         # OpenAI 兼容响应按 index 排序，防御乱序
         items = sorted(items, key=lambda d: d.get("index", 0))
         vectors = [item.get("embedding") for item in items]
-        if len(vectors) != len(texts) or any(v is None for v in vectors):
+        if len(vectors) != len(batch) or any(v is None for v in vectors):
             raise LLMError("INTERNAL", "embedding response missing vectors")
         return vectors
 

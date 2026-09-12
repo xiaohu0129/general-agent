@@ -247,6 +247,23 @@ FastAPI 依赖链 `governance_dep`（按 `auth_mode` 分流：`session` -> cooki
 - `api/health.py`：`/health` 增 `routing.{enabled,index_ready,mode,embedding_model}`。
 - 验证：`tests/test_skill_routing.py`（规则/索引缓存/六级路由路径/embedding 客户端/澄清 e2e/确定性复现/temperature/stub embedding/health/lifespan 装配）；conftest 默认 `AGENT_ROUTING__ENABLED=false`（避免 lifespan 连网络），路由测试自行注入 fake router。
 
+### 5.4 意图路由增强落地（intent-routing-context-quality change）
+
+- `skill_router/index.py`：**多向量索引**——每 Skill 产出 description 一条 + 每条 example 一条向量段（`spans:[{skill,has_examples,count}]` 对齐），检索段内 max-sim 后全局 top-k；缓存版本键升级（旧单向量缓存自动重建）；`skills_without_examples` property 供 health 筛选；构建部分失败降级单向量/ready=False。
+- `embedding.py`：`embed_texts` 按 `embedding.batch_size`（默认 64）分批请求按序拼接（千级文本不撞端点批量上限）。
+- `skill_router/keyword.py`（新增）：`KeywordIndex`——零依赖分词（`[A-Za-z0-9]+` 整体成词 + 中文 bi-gram + 停用字表）、tf/df/avgdl BM25（k1=1.5/b=0.75）、每 Skill 多段段内 max；纯内存不落盘、不占缓存版本键。
+- `skill_router/context.py`（新增）：`build_context_query`（历史拼接，0 LLM）/`contains_referral`（指代词表 `routing.refer_terms`）/`rewrite_query`（temperature=0 改写 LLM 输出 `{query}`，失败抛出让路由降级拼接）。
+- `router.py`：D2 控制流（规则对当前原文 → BM25 一次 → 拼接向量检索 + RRF 融合判首次高置信门 → 按需改写重检（复用同一 BM25）→ 路由 LLM 三级分流）；`semantic` 入参（stub/未就绪跳过向量路）；`history`/`prev_clarify`/`selection` 入参（文本闭环/选项确定性收窄 path=option）；`_classify` 输出 `{skills,category,confidence,reason,clarify_question,categories}`，`llm_conf_high` 三级分流，点名 skills 与候选集取交集；澄清分支产出 `clarify_options`（`category:`/`skill:` 前缀，≤`clarify_option_max`，可关）；path 枚举新增 `option`。
+- `skills/base.py`：`to_tool(arg_guard=)`——守卫经 `StructuredTool.from_function(handle_validation_error=回调)`（框架 `_parse_input` 先于 `arun` 校验，arun 内守卫是死代码）；回调返回（非抛出）`{"errorCode":"MISSING_ARGS","missing":[{field,hint}],"message":引导语}` JSON，框架产出 `status=error` ToolMessage 走 `on_tool_end`；`arg_guard=false` 不传回调逐字节回落框架默认。
+- `runner.py`：`on_tool_end` 识别 error ToolMessage → `tool_end{status:"error",errorCode}`（MISSING_ARGS 记 `record_missing_args`，不记业务错误）；误杀比对挂 `on_chat_model_end` 的 `AIMessage.tool_calls`（探针事实：集外 tool_call 未绑定、不发 on_tool_start/end），越界（path ∈ {rule,vector,llm,option}）计 `record_intent_miss(path,retrieval)` + turn span `route.missed_tool`；`run_turn` 增 `clarify_meta`/`route_path`/`recommended_tools`/`retrieval` 透传，澄清分支落 meta + `clarify` SSE 事件。
+- `events.py`：新增 `clarify(turn_id,trace_id,question,options)` 事件（`with_seq`/ring 回放自动兼容）。
+- `message_store.py` + `mysql_client.py`：`agent_message` 增 `meta JSON NULL`（建表含列 + `init_schema` information_schema 惰性 ALTER）；`append_message(meta=)`、`load_messages` 透出 meta/turn_id、`load_web_messages` DTO 透出 options/selected、`update_clarify_selected`（JSON_SET 合并回写，四归属键+turn_id+role='assistant' WHERE）。
+- `api/chat.py`：路由前 `_load_routing_context`（拼接历史与澄清闭环解耦——history 载最近 `context_turns*2+1` 条，`context_turns=0` 不载；prev_clarify 恒以 `limit=1` 收窄读取末条 assistant 行的澄清 meta，不受 `context_turns` 影响）；`ChatRequest.clarify_selection:{value}` 回传；path=option 成功后 best-effort `update_clarify_selected`；clarify_meta 装配透传；`_derive_retrieval`（details 的 degraded_keyword/semantic_off → keyword）；`_serialize_details`（list/dict 序列化紧凑字符串进 span/审计，修复标量过滤丢 top_k）；clarify_outcome → `record_clarify`、分数 histogram（vector/bm25/rrf 三路）、改写计数接线。
+- `app.py`：`semantic=bool(index.ready and not is_stub)` 传入 router；health `routing` 增 `multi_vector/hybrid/semantic/clarify_options/no_examples_skills`，mode 三态 `rule+vector|rule+keyword|rule-only`（+degraded）。
+- `config.py`/`config.yaml`：`routing` 增 `context_turns/query_rewrite/refer_terms/multi_vector/llm_conf_high/arg_guard/hybrid/rrf_k/keyword_top_k/clarify_options/clarify_option_max`；`embedding.batch_size`。
+- `observability.py` 新 metric：`agent.intent.miss.count`（env/path/retrieval）、`agent.intent.score`/`score_gap`（histogram，route=vector/bm25/rrf）、`agent.intent.rewrite.count`（env/result）、`agent.tool.missing_args.count`（env/tool）；`agent.intent.clarify.count` 改带 `result=option|text|repeat` 标签（**移除** record_intent_route 内嵌 path=clarify 自动累加分支，防双计；首轮澄清无 clarify_outcome 不计数，由 route counter path 维度承担）。
+- 验证：`tests/test_skill_routing.py`（三级分流/多向量/BM25/RRF/改写）、`test_config_routing.py`、`test_fake_store_meta.py`、`test_clarify_loop.py`、`test_clarify_meta_storage.py`、`test_clarify_options.py`、`test_clarify_sse.py`、`test_arg_guard.py`、`test_intent_miss.py`、`test_observability_metrics.py`、`test_health_and_serialization.py`。
+
 ### 5.2 M8 可观测性落地（文件级）
 
 - `general_agent/observability.py`：`XTraceIdPropagator`（复合 `TraceContext`+`Baggage`+`XTraceId`）；providers（`ParentBased(ALWAYS_ON)` + OTLP/console exporter）；7 项 metric instruments；`record_turn/llm/tool` + `record_span_error`；`severity_of` 映射；`setup_observability`/`instrument_app`/`shutdown_observability`。

@@ -31,6 +31,11 @@ def turn_end(turn_id: str, trace_id: str, finish_reason: str = FINISH_REASON_STO
     return _sse("turn_end", turnId=turn_id, traceId=trace_id, finishReason=finish_reason)
 
 
+def clarify(turn_id: str, trace_id: str, question: str, options: list[dict]) -> dict:
+    """结构化澄清卡片事件：question 与澄清文本同源，options=[{label,value}]，value 带 category:/skill: 前缀。"""
+    return _sse("clarify", turnId=turn_id, traceId=trace_id, question=question, options=options)
+
+
 def tool_start(turn_id: str, trace_id: str, tool_call_id: str, tool_name: str, args: dict) -> dict:
     return _sse(
         "tool_start",

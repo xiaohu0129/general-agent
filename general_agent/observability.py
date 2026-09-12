@@ -186,6 +186,11 @@ _rate_limit_hits = None
 _intent_route = None
 _intent_clarify = None
 _intent_degrade = None
+_intent_miss = None
+_intent_score = None
+_intent_score_gap = None
+_intent_rewrite = None
+_missing_args = None
 
 
 def setup_observability(settings) -> None:
@@ -194,6 +199,8 @@ def setup_observability(settings) -> None:
     global _tool_duration, _tool_calls, _tool_errors
     global _rate_limit_hits
     global _intent_route, _intent_clarify, _intent_degrade
+    global _intent_miss, _intent_score, _intent_score_gap
+    global _intent_rewrite, _missing_args
     if _initialized:
         return
     _setup_propagator()
@@ -253,8 +260,13 @@ def setup_observability(settings) -> None:
     _tool_errors = meter.create_counter("agent.tool.errors", description="Tool errors by code")
     _rate_limit_hits = meter.create_counter("agent.rate_limit.hits", description="Rate limit hits by env")
     _intent_route = meter.create_counter("agent.intent.route.count", description="Skill routing decisions by path")
-    _intent_clarify = meter.create_counter("agent.intent.clarify.count", description="Routing clarify fallbacks")
+    _intent_clarify = meter.create_counter("agent.intent.clarify.count", description="Clarify outcomes by result (option/text/repeat)")
     _intent_degrade = meter.create_counter("agent.intent.degrade.count", description="Routing degraded/fallback decisions")
+    _intent_miss = meter.create_counter("agent.intent.miss.count", description="Routing misses: out-of-set tool calls")
+    _intent_score = meter.create_histogram("agent.intent.score", description="Retrieval top1 score by route (vector/bm25/rrf)")
+    _intent_score_gap = meter.create_histogram("agent.intent.score_gap", description="Vector top1-top2 score gap")
+    _intent_rewrite = meter.create_counter("agent.intent.rewrite.count", description="Query rewrites by result (success/failed)")
+    _missing_args = meter.create_counter("agent.tool.missing_args.count", description="Tool calls rejected for missing required args")
 
     # httpx 出站自动 instrumentation（注入 traceparent 给 LLM / 业务下游）
     try:
@@ -350,11 +362,46 @@ def record_rate_limit_hit(env: str) -> None:
 
 
 def record_intent_route(path: str, *, category: str = "") -> None:
-    """记录 Skill 路由决策：path 为 rule/vector/llm/chitchat/clarify/fallback/degraded（低基数）。"""
+    """记录 Skill 路由决策：path 为 rule/vector/llm/option/chitchat/clarify/fallback/degraded（低基数）。"""
     env = current_env()
     if _intent_route is not None:
         _intent_route.add(1, {"env": env, "path": path, "category": category or "none"})
-    if path == "clarify" and _intent_clarify is not None:
-        _intent_clarify.add(1, {"env": env})
     if path in ("fallback", "degraded") and _intent_degrade is not None:
         _intent_degrade.add(1, {"env": env, "path": path})
+
+
+def record_intent_miss(path: str, *, retrieval: str) -> None:
+    """误杀计数：收窄路径（rule/vector/llm/option）下模型实际调用了推荐集外工具。"""
+    if _intent_miss is not None:
+        _intent_miss.add(1, {"env": current_env(), "path": path, "retrieval": retrieval})
+
+
+def record_intent_score(top1: float, gap: float | None, route: str) -> None:
+    """检索分数分布：route 为 vector/bm25/rrf；gap 仅向量路（top1-top2）有语义。"""
+    env = current_env()
+    if _intent_score is not None:
+        _intent_score.record(top1, {"env": env, "route": route})
+    if gap is not None and _intent_score_gap is not None:
+        _intent_score_gap.record(gap, {"env": env, "route": route})
+
+
+def record_intent_rewrite(result: str) -> None:
+    """query 改写触发计数：result 为 success|failed。"""
+    if result not in ("success", "failed"):
+        raise ValueError(f"invalid rewrite result: {result}")
+    if _intent_rewrite is not None:
+        _intent_rewrite.add(1, {"env": current_env(), "result": result})
+
+
+def record_missing_args(tool: str) -> None:
+    """缺参追问触发计数：工具因缺必填参数未执行（MISSING_ARGS）。"""
+    if _missing_args is not None:
+        _missing_args.add(1, {"env": current_env(), "tool": tool or ""})
+
+
+def record_clarify(result: str) -> None:
+    """澄清闭环结局计数：result 为 option|text|repeat（首轮澄清无结局，不调用）。"""
+    if result not in ("option", "text", "repeat"):
+        raise ValueError(f"invalid clarify result: {result}")
+    if _intent_clarify is not None:
+        _intent_clarify.add(1, {"env": current_env(), "result": result})

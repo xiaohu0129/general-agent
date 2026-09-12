@@ -123,7 +123,10 @@ LangGraph 的 stream 事件（状态更新、工具调用开始/结束、token �
 | `tool_start` | 工具调用开始 | `toolCallId`、`toolName`、`args`（完整入参，非流式） | 显示“调用工具 X，参数 ...” |
 | `tool_end` | 工具调用结束 | `toolCallId`、`status`（success/error）、`result` 或 `error`+`errorCode` | 显示工具结果或错误 |
 | `turn_end` | 轮次结束 | `finishReason`（`stop`/`max_tool_rounds`） | 关闭气泡 |
+| `clarify` | 路由低置信澄清且结构化选项开启（`routing.clarify_options`，默认开） | `question`（澄清文本，同轮 `turn_delta` 已流式下发过）、`options:[{label,value}]`（label 为展示文案；value 为带前缀的确定性可路由值：`category:<名>` 收窄到该技能域全部工具、`skill:<名>` 收窄到单个 Skill，`<名>` 为 env 候选集内合法标识） | 渲染可点选项卡片；点选后下一轮请求 `message` 填 label 且携带 `clarify_selection:{value}` 回传（value 原样、MUST NOT 进 message）；手打时不携带该字段 |
 | `error` | 异常 | `message`（用户可读）、`code` | 错误提示 |
+
+**协议兼容（additive）**：`clarify` 事件与 `clarify_selection` 回传字段均为可选新增——旧前端忽略未知事件类型/字段时，仍凭 `turn_delta` 澄清文本呈现纯文本澄清（等价改动前行为）；`clarify` 事件经 `eventSeq` 写入 ring buffer，`Last-Event-ID` 断线重连随缺失事件一并重放（含 options）。澄清轮以 `turn_start .. turn_delta .. clarify .. turn_end{finishReason:"stop"}` 收尾，不构建 ReAct 图、不调用业务工具。澄清选项随消息 `meta`（`kind:"clarify"`/`categories`/`options`/闭环后 `selected`）持久化，`GET /sessions/{id}/messages` 回放透出 `options`/`selected`。选项卡片前端渲染由 change `structured-clarification-options`（已实现待归档）消费本协议。
 
 **协议格式**：结构化事件流（`event:`+`data:`），业界主流（Vercel AI SDK / OpenAI / Anthropic 同向），非裸 `data:`。
 
@@ -321,18 +324,30 @@ Skill 规模上量（数百）时，平铺全部工具会使模型选择质量�
 
 ```
 [0] env 硬过滤（allowed_envs，确定性，不可被路由绕过）
-[1] 规则路由：配置化正则/命令命中 -> 确定 Skill 集合（0 LLM，可复现，逃生门）
-[2] 向量检索 Tool RAG（主力）：embed(Skill description+examples) 建索引（启动批量构建、
-    元数据哈希本地缓存、内存余弦），embed(用户消息) 检索 top-k；top1 过阈值且分差明确 -> 收窄
-[3] 低置信兜底：结构化输出路由 LLM（temperature=0）从 category 清单选域；仍不明确 -> 向用户澄清
-    （普通文本轮次，不建 ReAct 图、不调工具）
+[1] 规则路由：配置化正则/命令命中当前轮原文 -> 确定 Skill 集合（0 LLM，可复现，逃生门，不受上下文/澄清状态污染）
+[2] BM25 关键词路（hybrid 开时）：对当前消息原文跑一次（精确符号订单号/型号/缩写召回；零依赖分词
+    = 英文数字整体成词 + 中文 bi-gram + 停用字表；每 Skill 多段、段内 max 聚合；纯内存不落盘）
+[3] 向量检索 Tool RAG（主力）：检索 query 默认拼接最近 N 轮历史（routing.context_turns，默认 3，0=关闭），
+    与 BM25 经 RRF 融合（routing.rrf_k）；top1 过阈值且分差明确（只看向量余弦）-> vector 路径直接收窄
+    （0 LLM）；放行集保底并入 BM25 rank≤3 防精确符号漏召回；未命中指代词才放行高置信
+[3b] 按需 query 改写：命中指代词（refer_terms）或拼接低置信时，一次改写 LLM（temperature=0）把
+    历史+消息改写为独立查询重检（与同一 BM25 融合），重检高置信 -> 直接 vector 收窄跳过路由 LLM；
+    改写失败静默降级拼接（不杀轮次）
+[4] 低置信兜底：结构化输出路由 LLM（temperature=0）三级分流——高置信（≥routing.llm_conf_high）
+    点名候选集内 Skill 只收窄这些；中置信/仅 category 选定域内全部候选；低置信/unknown/chitchat 分流；
+    BM25 命中作为提示注入兜底 prompt
+[5] 澄清：文本 + 结构化 options（category:/skill: 前缀 value，clarify_options 可关）；
+    下一轮点选回传 clarify_selection.value 确定性收窄（path=option，跳过向量/LLM），手打在
+    prev_clarify 候选方向内文本闭环（不重复反问；仍无法对应再澄清时携带历史方向）
 ```
 
-- **Skill 元数据升级**：基类新增 `category`（域标签）与 `examples`（2~5 条示例话语，向量检索语义主体）；缺 examples 以 description 兜底并在路由记录标注。
-- **embedding**：OpenAI 兼容 `POST {base_url}/v1/embeddings`（`embedding.*` 配置，方舟 `doubao-embedding-vision`）；留空指向本地 stub（确定性哈希向量，无语义），路由自动降级为仅规则+全量兜底并启动 WARN；stub_llm 提供 `/v1/embeddings`。
-- **确定性**：规则数学确定；向量检索固定 embedding 模型 id + 索引版本（落 span）；执行/路由 LLM 固定 `llm.temperature=0`；不追求回复文本逐字一致。
-- **可观测**：`intent_route` span（路径/top-k 分数/分差/最终工具集/模型与索引版本）+ `agent.intent.route.*` 低基数 metric + 审计日志，支持离线回放与"检索推荐 vs 模型实际选择"比对。
-- **非目标**：不引入向量数据库（几百向量内存计算足够）；不做 supervisor 多子代理（category 分组为其预留）；模型执行中主动换批的 `search_skills` 元工具为二期（数据驱动）。
+- **Skill 元数据升级**：基类新增 `category`（域标签）与 `examples`（2~5 条示例话语，向量检索语义主体）；**多向量索引**：每 Skill 产出 description 一条 + 每条 example 一条向量（`embedding.batch_size` 分批请求），检索按段内 max-sim 计分（多用法 Skill 不被语义平均）；缺 examples 的 Skill 以 description 兜底并标注 `has_examples=false`（health `no_examples_skills` 可筛）。
+- **embedding**：OpenAI 兼容 `POST {base_url}/v1/embeddings`（`embedding.*` 配置，方舟 `doubao-embedding-vision`）；留空指向本地 stub（确定性哈希向量，无语义），路由自动降级为**规则+BM25 收窄+LLM 兜底**（`mode=rule+keyword`，`semantic=false` 跳过向量路防伪高置信）并启动 WARN；stub_llm 提供 `/v1/embeddings`。运行中单次 query embed 失败与启动期故障同构（BM25 收窄→LLM 兜底，不全量平铺）。
+- **澄清状态持久化**：澄清轮 assistant 消息落 `meta={kind:"clarify",categories,options}`（`agent_message.meta JSON` 列，存量 NULL 兼容）；chat 层路由前 load 最近历史，据末条 assistant meta 构造 `prev_clarify`；选项闭环后 `meta.selected` 回写（JSON_SET 合并不覆盖 options）。
+- **缺参追问（半槽位填充）**：工具执行前框架按 `args_schema` 校验（`StructuredTool.handle_validation_error` 回调），缺必填参数不执行业务、回流 `errorCode=MISSING_ARGS` 结构化引导（`status=error` 的 ToolMessage 经 `on_tool_end`），模型下一轮定向追问、用户补齐后重试（`routing.arg_guard` 构造期开关，关闭回落框架默认 INTERNAL）。
+- **确定性**：规则数学确定；向量检索固定 embedding 模型 id + 索引版本（落 span）；执行/路由/改写 LLM 固定 `llm.temperature=0`；不追求回复文本逐字一致。
+- **可观测**：`intent_route` span（路径/top-k 分数含 BM25 与 RRF 两路（list/dict 序列化为紧凑字符串）/分差/最终工具集/是否改写/模型与索引版本）+ `agent.intent.*` 低基数 metric（route/clarify/degrade/miss/score/score_gap/rewrite）+ `agent.tool.missing_args.count` + 审计日志，支持离线回放与"检索推荐 vs 模型实际选择"误杀比对（miss 计数带 path/retrieval 标签；BM25 降级轮 LLM 兜底成功照计，以 retrieval=keyword 区分观测）。
+- **非目标**：不引入向量数据库（千级向量内存计算足够）；不做 supervisor 多子代理（category 分组为其预留）；模型执行中主动换批的 `search_skills` 元工具为二期（数据驱动）；不做 DST/表单引擎（缺参追问刻意复用 ReAct+历史半槽位）。
 
 ---
 

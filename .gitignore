@@ -49,3 +49,7 @@ artifacts/
 # Skill 向量索引本地缓存（启动时按元数据哈希重建，不入库）
 .skill_index_cache/
 
+# AI 中间产物（探针脚本/临时验证代码），不入库
+temp/
+
+.superpowers/

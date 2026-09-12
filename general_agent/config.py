@@ -4,7 +4,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -46,6 +46,24 @@ class RoutingSettings(BaseModel):
     score_threshold: float = 0.5  # top-1 余弦相似度高于该值才可能高置信收窄（按 embedding 模型调优）
     margin: float = 0.1  # top-1 与 top-2 分差需大于该值才判定高置信
     rules: list[RouteRule] = []
+    # 路由拼接的最近对话轮数（跨轮上下文），0=关闭拼接（澄清闭环不受影响，独立读取末条澄清行）
+    context_turns: int = 3
+    query_rewrite: bool = True  # 按需 query 改写开关（结合历史把指代表述改写为自包含 query）
+    # 内置常用中文指代词默认表：命中则判定 query 含指代/省略，需结合历史改写
+    refer_terms: list[str] = [
+        "它", "他", "她", "他们", "她们", "它们",
+        "这个", "那个", "这些", "那些", "这家", "那家", "这款", "那款", "这件", "那件",
+        "上面", "前面", "上述", "刚才", "刚说的", "之前说的", "上一个",
+        "再来", "继续", "还是", "同样", "换成",
+    ]
+    multi_vector: bool = True  # 每-example 多向量索引开关（示例文本逐句切分 embedding）
+    llm_conf_high: float = 0.7  # 兜底 LLM 选域高置信点名阈值（≥该值直接收窄到单域）
+    arg_guard: bool = True  # 缺参校验守卫开关（构造期绑定，低置信/澄清场景拦截必填参数缺失）
+    hybrid: bool = True  # BM25 关键词路 + 向量路混合检索开关
+    rrf_k: int = 60  # RRF 融合常数（两路排名 reciprocal rank fusion）
+    keyword_top_k: int = 10  # 关键词路（BM25）返回候选数
+    clarify_options: bool = True  # 低置信时给用户返回结构化澄清选项的开关
+    clarify_option_max: int = 4  # 澄清选项数量上限
 
 
 class EmbeddingSettings(BaseModel):
@@ -56,6 +74,7 @@ class EmbeddingSettings(BaseModel):
     model: str = "doubao-embedding-vision"  # 部署时按实际 embedding 模型 id 覆盖
     timeout: float = 30.0
     cache_dir: str = ".skill_index_cache"  # Skill 向量索引本地缓存目录
+    batch_size: int = Field(default=64, ge=1)  # 索引构建时 embed_texts 分批请求的批大小
 
 
 class AgentSettings(BaseModel):
@@ -66,7 +85,7 @@ class AgentSettings(BaseModel):
     context_strategy: str = "trim"  # trim | trim_then_summarize（summarize 需额外 LLM 调用，预留）
     summarize_threshold: float = 0.5  # 触发摘要的历史占比阈值（预留）
     # Agent 系统提示词；业务方可通过 config/env 覆盖
-    system_prompt: str = "你是一个通用 AI 助手，可通过工具（Skill）帮助用户完成任务。需要调用工具时直接调用。"
+    system_prompt: str = "你是一个通用 AI 助手，可通过工具（Skill）帮助用户完成任务。需要调用工具时直接调用。工具提示缺少参数时，不要编造参数，先向用户询问缺失的信息。"
 
 
 class BrokerSettings(BaseModel):

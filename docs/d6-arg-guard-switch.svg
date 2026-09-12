@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 780" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2e9e5b"/>
+    </marker>
+    <marker id="arrGray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9aa0a6"/>
+    </marker>
+  </defs>
+
+  <text x="520" y="36" text-anchor="middle" font-size="20" font-weight="700" fill="#1f2329">arg_guard 开关落点：从「arun 内运行时 if」变成「构造工具时传不传回调」</text>
+
+  <!-- ===================== 左栏：原设想 ===================== -->
+  <text x="250" y="78" text-anchor="middle" font-size="15" font-weight="700" fill="#d9534f">原 D6 设想：守卫写在 arun 内，用 if 控制</text>
+
+  <rect x="70" y="96" width="360" height="46" rx="8" fill="#fff" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="250" y="124" text-anchor="middle" font-size="13" fill="#1f2329">模型缺参发起工具调用 args={}</text>
+
+  <line x1="250" y1="142" x2="250" y2="166" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="70" y="168" width="360" height="60" rx="8" fill="#fff" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="250" y="192" text-anchor="middle" font-size="13" fill="#1f2329">框架先执行 _parse_input</text>
+  <text x="250" y="212" text-anchor="middle" font-size="12.5" fill="#6b7280">用 args_schema.model_validate 校验（内置、必经）</text>
+
+  <line x1="250" y1="228" x2="250" y2="252" stroke="#6b7280" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <rect x="70" y="254" width="360" height="50" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.5"/>
+  <text x="250" y="284" text-anchor="middle" font-size="13" fill="#c0392b" font-weight="600">缺必填 → 框架在此抛 ValidationError</text>
+
+  <line x1="250" y1="304" x2="250" y2="330" stroke="#d9534f" stroke-width="2" stroke-dasharray="5,4"/>
+  <text x="262" y="322" font-size="12" fill="#d9534f" font-weight="700">✗ 中断</text>
+
+  <rect x="70" y="332" width="360" height="150" rx="8" fill="#fafafa" stroke="#d9534f" stroke-width="1.5" stroke-dasharray="7,5"/>
+  <text x="90" y="358" font-size="12.5" fill="#374151" font-family="Consolas,monospace">async def arun(**kwargs):</text>
+  <text x="90" y="380" font-size="12.5" fill="#d9534f" font-family="Consolas,monospace">  if arg_guard:            # ← 设想的开关</text>
+  <text x="90" y="402" font-size="12.5" fill="#d9534f" font-family="Consolas,monospace">    model_validate(kwargs) # ← 设想的守卫</text>
+  <text x="90" y="424" font-size="12.5" fill="#d9534f" font-family="Consolas,monospace">    raise MISSING_ARGS</text>
+  <text x="90" y="446" font-size="12.5" fill="#374151" font-family="Consolas,monospace">  return await skill.run(ctx, **kwargs)</text>
+  <text x="250" y="470" text-anchor="middle" font-size="12.5" fill="#d9534f" font-weight="700">↑ 整个 arun 闭包永不执行（探针 executed=False）</text>
+
+  <rect x="70" y="500" width="360" height="56" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.5"/>
+  <text x="250" y="523" text-anchor="middle" font-size="12.5" fill="#c0392b" font-weight="600">if arg_guard 是死代码：框架在进入 arun 前</text>
+  <text x="250" y="543" text-anchor="middle" font-size="12.5" fill="#c0392b" font-weight="600">已 re-raise，开关 true/false 都走不到</text>
+
+  <!-- ===================== 右栏：实际机制 ===================== -->
+  <text x="785" y="78" text-anchor="middle" font-size="15" font-weight="700" fill="#2e9e5b">实际机制：构造工具时决定「传不传」回调</text>
+
+  <rect x="605" y="96" width="360" height="50" rx="8" fill="#fff" stroke="#2e9e5b" stroke-width="1.5"/>
+  <text x="785" y="120" text-anchor="middle" font-size="13" fill="#1f2329">to_tool(ctx)：读 get_settings()</text>
+  <text x="785" y="139" text-anchor="middle" font-size="12.5" fill="#6b7280">.routing.arg_guard，据此构造 StructuredTool</text>
+
+  <line x1="785" y1="146" x2="785" y2="172" stroke="#2e9e5b" stroke-width="1.5" marker-end="url(#arrR)"/>
+
+  <polygon points="785,174 852,214 785,254 718,214" fill="#fff6e5" stroke="#f5a623" stroke-width="1.6"/>
+  <text x="785" y="219" text-anchor="middle" font-size="13" fill="#8a5b00" font-weight="700">arg_guard ?</text>
+
+  <!-- true 分支 -->
+  <line x1="735" y1="232" x2="668" y2="278" stroke="#2e9e5b" stroke-width="1.6" marker-end="url(#arrR)"/>
+  <text x="660" y="252" text-anchor="middle" font-size="12.5" fill="#2e9e5b" font-weight="700">true（传回调）</text>
+
+  <rect x="556" y="280" width="222" height="72" rx="8" fill="#eafaf0" stroke="#2e9e5b" stroke-width="1.5"/>
+  <text x="667" y="306" text-anchor="middle" font-size="12" fill="#1f2329" font-family="Consolas,monospace">from_function(...,</text>
+  <text x="667" y="324" text-anchor="middle" font-size="12" fill="#1f2329" font-family="Consolas,monospace">handle_validation_error=</text>
+  <text x="667" y="342" text-anchor="middle" font-size="12" fill="#2e9e5b" font-weight="700" font-family="Consolas,monospace">  missing_args_handler)</text>
+
+  <line x1="667" y1="352" x2="667" y2="376" stroke="#2e9e5b" stroke-width="1.5" marker-end="url(#arrR)"/>
+
+  <rect x="556" y="378" width="222" height="58" rx="8" fill="#fff" stroke="#2e9e5b" stroke-width="1.3"/>
+  <text x="667" y="402" text-anchor="middle" font-size="12.5" fill="#1f2329">校验失败 → 框架调用回调</text>
+  <text x="667" y="421" text-anchor="middle" font-size="12" fill="#6b7280">（不再 re-raise）</text>
+
+  <line x1="667" y1="436" x2="667" y2="460" stroke="#2e9e5b" stroke-width="1.5" marker-end="url(#arrR)"/>
+
+  <rect x="556" y="462" width="222" height="72" rx="8" fill="#eafaf0" stroke="#2e9e5b" stroke-width="1.5"/>
+  <text x="667" y="488" text-anchor="middle" font-size="12.5" fill="#1f2329" font-weight="600">返回 MISSING_ARGS 引导 JSON</text>
+  <text x="667" y="508" text-anchor="middle" font-size="12" fill="#1f2329">ToolMessage(status=error)</text>
+  <text x="667" y="526" text-anchor="middle" font-size="12" fill="#6b7280">回流 ReAct，业务 arun 未跑</text>
+
+  <line x1="667" y1="534" x2="667" y2="558" stroke="#2e9e5b" stroke-width="1.5" marker-end="url(#arrR)"/>
+
+  <rect x="556" y="560" width="222" height="44" rx="8" fill="#2e9e5b" stroke="#2e9e5b" stroke-width="1.3"/>
+  <text x="667" y="587" text-anchor="middle" font-size="12.5" fill="#fff" font-weight="700">模型下一轮定向追问 ✅</text>
+
+  <!-- false 分支 -->
+  <line x1="835" y1="232" x2="902" y2="278" stroke="#9aa0a6" stroke-width="1.6" marker-end="url(#arrGray)"/>
+  <text x="912" y="252" text-anchor="middle" font-size="12.5" fill="#9aa0a6" font-weight="700">false（不传）</text>
+
+  <rect x="800" y="280" width="210" height="72" rx="8" fill="#f3f4f6" stroke="#9aa0a6" stroke-width="1.5"/>
+  <text x="905" y="312" text-anchor="middle" font-size="12" fill="#1f2329" font-family="Consolas,monospace">from_function(...)</text>
+  <text x="905" y="334" text-anchor="middle" font-size="12" fill="#6b7280">handle_validation_error</text>
+  <text x="905" y="347" text-anchor="middle" font-size="12" fill="#6b7280">缺省 = False</text>
+
+  <line x1="905" y1="352" x2="905" y2="376" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrGray)"/>
+
+  <rect x="800" y="378" width="210" height="58" rx="8" fill="#fff" stroke="#9aa0a6" stroke-width="1.3"/>
+  <text x="905" y="402" text-anchor="middle" font-size="12.5" fill="#1f2329">校验失败 → 框架 re-raise</text>
+  <text x="905" y="421" text-anchor="middle" font-size="12" fill="#6b7280">ValidationError</text>
+
+  <line x1="905" y1="436" x2="905" y2="460" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrGray)"/>
+
+  <rect x="800" y="462" width="210" height="72" rx="8" fill="#f3f4f6" stroke="#9aa0a6" stroke-width="1.5"/>
+  <text x="905" y="488" text-anchor="middle" font-size="12.5" fill="#1f2329" font-weight="600">ToolNode 兜底处理</text>
+  <text x="905" y="508" text-anchor="middle" font-size="12" fill="#c0392b" font-weight="700">errorCode = INTERNAL</text>
+  <text x="905" y="526" text-anchor="middle" font-size="12" fill="#6b7280">（无 .code 属性）</text>
+
+  <line x1="905" y1="534" x2="905" y2="558" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrGray)"/>
+
+  <rect x="800" y="560" width="210" height="44" rx="8" fill="#9aa0a6" stroke="#9aa0a6" stroke-width="1.3"/>
+  <text x="905" y="587" text-anchor="middle" font-size="12.5" fill="#fff" font-weight="700">= 改动前既有行为</text>
+
+  <!-- ===================== 底部关键澄清 ===================== -->
+  <rect x="60" y="628" width="950" height="128" rx="10" fill="#eef1ff" stroke="#4d6bfe" stroke-width="1.6"/>
+  <text x="80" y="656" font-size="14" fill="#2b3a67" font-weight="700">关键澄清：校验本身关不掉，开关只决定「校验失败后给模型什么反馈」</text>
+  <text x="80" y="682" font-size="13" fill="#1f2329">• args_schema 校验是 LangChain 内置（_parse_input 里的 model_validate），<tspan font-weight="700" fill="#2b3a67">每次调用都发生、无法关闭</tspan>；arg_guard 从不控制「要不要校验」。</text>
+  <text x="80" y="706" font-size="13" fill="#1f2329">• arg_guard=true  → 构造时<tspan font-family="Consolas,monospace" fill="#2e9e5b" font-weight="700"> 传 </tspan>handle_validation_error 回调 → 反馈是 MISSING_ARGS 引导（驱动追问、可计数）。</text>
+  <text x="80" y="728" font-size="13" fill="#1f2329">• arg_guard=false → 构造时<tspan font-family="Consolas,monospace" fill="#9aa0a6" font-weight="700"> 不传 </tspan>（缺省 False）→ 反馈是裸 ValidationError/INTERNAL，即回落现状。</text>
+  <text x="80" y="750" font-size="13" fill="#2b3a67" font-weight="600">→ 所以开关从「arun 内一句运行时 if」上移为「to_tool 构造工具时传不传 handle_validation_error 参数」，两种配置产出行为不同的工具对象。</text>
+</svg>

@@ -24,6 +24,7 @@ SCHEMA_DDL = """CREATE TABLE IF NOT EXISTS agent_message (
   content MEDIUMTEXT NOT NULL,
   tool_calls JSON NULL,
   tool_call_id VARCHAR(64) NULL,
+  meta JSON NULL,
   content_ref VARCHAR(512) NULL,
   content_size BIGINT NULL,
   content_kind VARCHAR(32) NULL,
@@ -80,6 +81,15 @@ async def init_schema(pool: aiomysql.Pool | None = None) -> None:
                 ddl = ddl.strip()
                 if ddl:
                     await cur.execute(ddl)
+            # 存量库惰性迁移：查 information_schema 判断 meta 列是否存在，缺则补列
+            await cur.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema=DATABASE() AND table_name='agent_message' AND column_name='meta'"
+            )
+            row = await cur.fetchone()
+            meta_exists = int(row[0]) if row else 0
+            if not meta_exists:
+                await cur.execute("ALTER TABLE agent_message ADD COLUMN meta JSON NULL")
     logger.info("agent_schema_ready")
 
 

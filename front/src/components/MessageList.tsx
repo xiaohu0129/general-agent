@@ -2,7 +2,13 @@ import { useEffect, useRef } from "react";
 import type { ChatMessage } from "../chat/model";
 import MessageBubble from "./MessageBubble";
 
-export default function MessageList({ messages }: { messages: ChatMessage[] }) {
+export default function MessageList({
+  messages,
+  onClarifySelect,
+}: {
+  messages: ChatMessage[];
+  onClarifySelect?: (messageId: string, value: string, label: string) => void;
+}) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -12,7 +18,7 @@ export default function MessageList({ messages }: { messages: ChatMessage[] }) {
   return (
     <div className="message-list">
       {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} />
+        <MessageBubble key={m.id} message={m} onClarifySelect={onClarifySelect} />
       ))}
       <div ref={bottomRef} />
     </div>

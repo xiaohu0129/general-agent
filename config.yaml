@@ -19,6 +19,7 @@ embedding:
   model: "doubao-embedding-vision"
   timeout: 30.0
   cache_dir: ".skill_index_cache"  # Skill 向量索引本地缓存目录（按元数据哈希失效）
+  batch_size: 64  # 索引构建时 embed_texts 分批请求的批大小
 
 routing:
   # Skill 意图路由（规则前置 -> 向量检索 Tool RAG -> 低置信 LLM 选域 -> 用户澄清）
@@ -33,6 +34,19 @@ routing:
   #     skills: ["help_skill"]
   #   - pattern: "工单|ticket"
   #     category: "ticket"
+  # ---- 上下文质量与混合检索（下列值均与代码默认一致，按需覆盖）----
+  context_turns: 3       # 路由拼接的最近对话轮数，0=关闭跨轮拼接（澄清闭环不受影响）
+  query_rewrite: true    # 按需 query 改写（把"它/那个/再来"等指代表述结合历史改写为自包含 query）
+  multi_vector: true     # 每-example 多向量索引（示例文本逐句切分 embedding）
+  llm_conf_high: 0.7     # 兜底 LLM 选域高置信点名阈值，≥该值直接收窄到单域
+  arg_guard: true        # 缺参校验守卫（构造期开关，拦截必填参数缺失）
+  hybrid: true           # BM25 关键词路 + 向量路混合检索
+  rrf_k: 60              # RRF 融合常数
+  keyword_top_k: 10      # 关键词路（BM25）返回候选数
+  clarify_options: true  # 低置信时返回结构化澄清选项
+  clarify_option_max: 4  # 澄清选项数量上限
+  # 指代词默认表在代码内维护（RoutingSettings.refer_terms），仅需覆盖时在下方配置，如：
+  # refer_terms: ["它", "那个", "这个", "再来", "继续"]
 
 agent:
   # 工具调用轮数上限；超出触发 GraphRecursionError -> turn_end{finishReason:"max_tool_rounds"}
@@ -42,7 +56,7 @@ agent:
   context_strategy: "trim"  # trim | trim_then_summarize（summarize 需额外 LLM 调用，预留）
   summarize_threshold: 0.5  # 触发摘要的历史占比阈值（预留）
   # 系统提示词，业务方可覆盖
-  system_prompt: "你是一个通用 AI 助手，可通过工具（Skill）帮助用户完成任务。需要调用工具时直接调用。"
+  system_prompt: "你是一个通用 AI 助手，可通过工具（Skill）帮助用户完成任务。需要调用工具时直接调用。工具提示缺少参数时，不要编造参数，先向用户询问缺失的信息。"
 
 broker:
   # 事件中枢 Broker + 心跳配置

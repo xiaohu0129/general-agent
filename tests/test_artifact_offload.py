@@ -61,9 +61,9 @@ async def test_small_content_inlined(tmp_path):
     ms = _store(tmp_path)
     await ms.append_message("s", "dev", "u1", "sid", "t1", "user", "短消息")
     sql, args = ms._pool.execs[0]
-    # args: service,env,user,session,turn,role,content,tool_calls,tool_call_id,ref,size,kind
+    # args: service,env,user,session,turn,role,content,tool_calls,tool_call_id,meta,ref,size,kind
     assert args[6] == "短消息"
-    assert args[9] is None and args[10] is None and args[11] is None
+    assert args[10] is None and args[11] is None and args[12] is None
 
 
 async def test_large_tool_result_offloaded(tmp_path):
@@ -71,7 +71,7 @@ async def test_large_tool_result_offloaded(tmp_path):
     big = '{"data": "' + "x" * 200 + '"}'
     await ms.append_message("s", "dev", "u1", "sid", "t1", "tool", big, tool_call_id="c1")
     _, args = ms._pool.execs[0]
-    head, ref, size, kind = args[6], args[9], args[10], args[11]
+    head, ref, size, kind = args[6], args[10], args[11], args[12]
     assert ref is not None and ref.endswith(".json")
     assert size == len(big.encode("utf-8"))
     assert kind == "json"
@@ -85,8 +85,8 @@ async def test_large_assistant_text_offloaded_as_text(tmp_path):
     big = "y" * 200
     await ms.append_message("s", "dev", "u1", "sid", "t1", "assistant", big)
     _, args = ms._pool.execs[0]
-    assert args[11] == "text"
-    assert args[9].endswith(".txt")
+    assert args[12] == "text"
+    assert args[10].endswith(".txt")
 
 
 async def test_load_context_does_not_fetch_blob(tmp_path):
@@ -129,4 +129,4 @@ async def test_blob_write_failure_falls_back_to_inline(tmp_path):
     await ms.append_message("s", "dev", "u1", "sid", "t1", "tool", big, tool_call_id="c1")
     _, args = ms._pool.execs[0]
     assert args[6] == big  # 回退：行内为完整内容
-    assert args[9] is None and args[10] is None and args[11] is None  # 无外置标记
+    assert args[10] is None and args[11] is None and args[12] is None  # 无外置标记

@@ -10,13 +10,18 @@ export async function streamChat(
   message: string,
   sessionId: string | null,
   handlers: StreamHandlers,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  clarifySelection?: string
 ): Promise<void> {
+  const body: Record<string, unknown> = { message, sessionId: sessionId ?? undefined };
+  if (clarifySelection) {
+    body.clarify_selection = { value: clarifySelection };
+  }
   const resp = await fetch(`${API_BASE}/chat`, {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify({ message, sessionId: sessionId ?? undefined }),
+    body: JSON.stringify(body),
     signal,
   });
 
@@ -42,14 +47,18 @@ export async function streamChat(
 
   const dispatch = (block: string) => {
     let eventName: string | null = null;
+    let id: string | null = null;
     const dataLines: string[] = [];
-    for (const line of block.split("\n")) {
+    // 块内行分隔兼容 CRLF（sse-starlette 默认）/ LF / CR
+    for (const line of block.split(/\r\n|\r|\n/)) {
       if (line.startsWith("event:")) {
         eventName = line.slice(6).trim();
       } else if (line.startsWith("data:")) {
         dataLines.push(line.slice(5).trim());
+      } else if (line.startsWith("id:")) {
+        id = line.slice(3).trim();
       }
-      // id: 行与 ": heartbeat" 注释行前端无需处理
+      // ": heartbeat" 等注释行忽略
     }
     if (!eventName || dataLines.length === 0) {
       return;
@@ -60,7 +69,9 @@ export async function streamChat(
     } catch {
       return;
     }
-    handlers.onEvent({ event: eventName, data } as ChatEvent);
+    handlers.onEvent(
+      (id !== null ? { event: eventName, data, id } : { event: eventName, data }) as ChatEvent
+    );
   };
 
   for (;;) {
@@ -69,11 +80,12 @@ export async function streamChat(
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    let idx: number;
-    // SSE 事件以空行分隔
-    while ((idx = buffer.indexOf("\n\n")) !== -1) {
-      const block = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
+    // SSE 事件以空行分隔，空行可以是 CRLFCRLF / LFLF / CRCR
+    const sep = /\r\n\r\n|\r\r|\n\n/;
+    let m: RegExpExecArray | null;
+    while ((m = sep.exec(buffer)) !== null) {
+      const block = buffer.slice(0, m.index);
+      buffer = buffer.slice(m.index + m[0].length);
       if (block.trim()) {
         dispatch(block);
       }

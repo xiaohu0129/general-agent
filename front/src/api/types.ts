@@ -49,13 +49,31 @@ export interface ErrorData {
   eventSeq?: number;
 }
 
+export interface ClarifyData {
+  turnId: string;
+  traceId: string;
+  question: string;
+  options: { label: string; value: string }[];
+  eventSeq?: number;
+}
+
+export interface NotificationData {
+  taskId: string;
+  status: string;
+  message?: string;
+  traceId?: string;
+  eventSeq?: number;
+}
+
 export type ChatEvent =
-  | { event: "turn_start"; data: TurnStartData }
-  | { event: "turn_delta"; data: TurnDeltaData }
-  | { event: "turn_end"; data: TurnEndData }
-  | { event: "tool_start"; data: ToolStartData }
-  | { event: "tool_end"; data: ToolEndData }
-  | { event: "error"; data: ErrorData };
+  | { event: "turn_start"; data: TurnStartData; id?: string }
+  | { event: "turn_delta"; data: TurnDeltaData; id?: string }
+  | { event: "turn_end"; data: TurnEndData; id?: string }
+  | { event: "tool_start"; data: ToolStartData; id?: string }
+  | { event: "tool_end"; data: ToolEndData; id?: string }
+  | { event: "clarify"; data: ClarifyData; id?: string }
+  | { event: "notification"; data: NotificationData; id?: string }
+  | { event: "error"; data: ErrorData; id?: string };
 
 export interface UserInfo {
   uid: string;
@@ -85,6 +103,9 @@ export interface HistoryMessage {
   contentRef?: string | null;
   contentSize?: number | null;
   contentKind?: string | null;
+  // 结构化澄清卡片：候选项与已选值（后端原样透出）
+  options?: Array<{ label: string; value: string }> | null;
+  selected?: string | null;
 }
 
 export interface MessagePage {

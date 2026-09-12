@@ -36,24 +36,40 @@ class FakeStore:
         self.rows: list[dict] = []
         self._seq = 0
 
+    def _scoped(self, service, env, user_id, session_id):
+        return [
+            r
+            for r in self.rows
+            if r["service"] == service
+            and r["env"] == env
+            and r["user_id"] == user_id
+            and r["session_id"] == session_id
+        ]
+
     async def load_messages(self, service, env, user_id, session_id, limit=None):
-        rows = list(self.rows)
+        rows = self._scoped(service, env, user_id, session_id)
         if limit is not None:
             rows = rows[-limit:]
         return [dict(r) for r in rows]
 
     async def append_message(
         self, service, env, user_id, session_id, turn_id, role, content,
-        tool_calls=None, tool_call_id=None,
+        tool_calls=None, tool_call_id=None, meta=None,
     ):
         self._seq += 1
         self.rows.append(
             {
                 "id": self._seq,
+                "service": service,
+                "env": env,
+                "user_id": user_id,
+                "session_id": session_id,
+                "turn_id": turn_id,
                 "role": role,
                 "content": content,
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,
+                "meta": meta,
                 "content_ref": None,
                 "content_size": None,
                 "content_kind": None,
@@ -61,33 +77,53 @@ class FakeStore:
         )
         return self._seq
 
-    async def count_messages(self, *a, **k):
-        return len(self.rows)
+    async def count_messages(self, service, env, user_id, session_id, *a, **k):
+        return len(self._scoped(service, env, user_id, session_id))
 
     async def load_web_messages(self, service, env, user_id, session_id, *, before=None, limit=50):
         limit = max(1, min(int(limit), 200))
-        rows = self.rows
+        rows = self._scoped(service, env, user_id, session_id)
         if before is not None:
             rows = [r for r in rows if r["id"] < before]
         desc = list(reversed(rows))[: limit + 1]
         has_more = len(desc) > limit
         page = list(reversed(desc[:limit]))
-        messages = [
-            {
-                "messageId": r["id"],
-                "turnId": f"turn-{r['id']}",
-                "role": r["role"],
-                "content": r.get("content") or "",
-                "toolCalls": r.get("tool_calls"),
-                "toolCallId": r.get("tool_call_id"),
-                "createdAt": None,
-                "contentRef": r.get("content_ref"),
-                "contentSize": r.get("content_size"),
-                "contentKind": r.get("content_kind"),
-            }
-            for r in page
-        ]
+        messages = []
+        for r in page:
+            meta = r.get("meta") or {}
+            messages.append(
+                {
+                    "messageId": r["id"],
+                    "turnId": r.get("turn_id"),
+                    "role": r["role"],
+                    "content": r.get("content") or "",
+                    "toolCalls": r.get("tool_calls"),
+                    "toolCallId": r.get("tool_call_id"),
+                    "createdAt": None,
+                    "contentRef": r.get("content_ref"),
+                    "contentSize": r.get("content_size"),
+                    "contentKind": r.get("content_kind"),
+                    "options": meta.get("options"),
+                    "selected": meta.get("selected"),
+                }
+            )
         return {"messages": messages, "nextCursor": page[0]["id"] if has_more and page else None, "hasMore": has_more}
+
+    async def update_clarify_selected(
+        self, service, env, user_id, session_id, turn_id, selected
+    ) -> int:
+        """按归属键 + turn_id 定位上一轮 assistant 澄清行，读-改-写合并 selected 到 meta。
+
+        不覆盖已有 options；meta 为 None 时新建 dict；返回更新行数（0 表示未定位到）。
+        """
+        changed = 0
+        for r in self._scoped(service, env, user_id, session_id):
+            if r["turn_id"] == turn_id and r["role"] == "assistant":
+                meta = dict(r.get("meta") or {})
+                meta["selected"] = selected
+                r["meta"] = meta
+                changed += 1
+        return changed
 
     async def list_artifact_refs(self, *a, **k):
         return [r["content_ref"] for r in self.rows if r.get("content_ref")]

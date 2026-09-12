@@ -6,17 +6,45 @@ SkillRegistry 显式注册，按 env 过滤后产出 LangChain StructuredTool（
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .. import observability
 from ..logging_setup import get_logger
 
 logger = get_logger(__name__)
+
+
+def _make_missing_args_handler(args_schema: type[BaseModel] | None):
+    """构造 StructuredTool.handle_validation_error 回调：缺参/非法字段 -> MISSING_ARGS JSON（返回非抛出）。
+
+    框架在调用 arun 前于 _parse_input 做 model_validate，校验失败时执行本回调，
+    返回的字符串成为 ToolMessage(status="error") 的 content，经 on_tool_end 回流。
+    """
+    hints: dict[str, str] = {}
+    if args_schema is not None:
+        for name, info in args_schema.model_fields.items():
+            hints[name] = info.description or info.title or name
+
+    def handler(e: ValidationError) -> str:
+        missing: list[dict[str, str]] = []
+        for err in e.errors():
+            loc = err.get("loc") or ()
+            field_name = str(loc[-1]) if loc else ""
+            missing.append({"field": field_name, "hint": hints.get(field_name, field_name)})
+        names = "、".join(m["field"] for m in missing)
+        message = f"参数不足，请勿编造参数，请先向用户询问以下参数：{names}"
+        return json.dumps(
+            {"errorCode": "MISSING_ARGS", "missing": missing, "message": message},
+            ensure_ascii=False,
+        )
+
+    return handler
 
 
 @dataclass
@@ -51,8 +79,12 @@ class Skill:
             return True
         return env in self.allowed_envs
 
-    def to_tool(self, ctx: SkillContext) -> BaseTool:
-        """产出带 span+metric 的 LangChain StructuredTool（async）。"""
+    def to_tool(self, ctx: SkillContext, arg_guard: bool = True) -> BaseTool:
+        """产出带 span+metric 的 LangChain StructuredTool（async）。
+
+        arg_guard=True 时安装缺参校验回调（arun 前由框架校验，失败回流 MISSING_ARGS）；
+        False 时不安装，回落框架默认错误处理。
+        """
         skill = self
 
         async def arun(**kwargs):
@@ -77,12 +109,15 @@ class Skill:
                         error_code=error_code,
                     )
 
-        return StructuredTool.from_function(
+        kwargs: dict[str, Any] = dict(
             coroutine=arun,
             name=self.name,
             description=self.description,
             args_schema=self.args_schema,
         )
+        if arg_guard:
+            kwargs["handle_validation_error"] = _make_missing_args_handler(self.args_schema)
+        return StructuredTool.from_function(**kwargs)
 
 
 class SkillRegistry:
@@ -94,8 +129,8 @@ class SkillRegistry:
     def register(self, skill: Skill) -> None:
         self._skills.append(skill)
 
-    def get_tools(self, ctx: SkillContext) -> list[BaseTool]:
-        return [s.to_tool(ctx) for s in self._skills if s.allowed(ctx.env)]
+    def get_tools(self, ctx: SkillContext, arg_guard: bool = True) -> list[BaseTool]:
+        return [s.to_tool(ctx, arg_guard=arg_guard) for s in self._skills if s.allowed(ctx.env)]
 
     def list_allowed(self, ctx: SkillContext) -> list[Skill]:
         """返回当前 env 可用的 Skill 对象（供路由层检索/收窄后再 to_tool）。"""

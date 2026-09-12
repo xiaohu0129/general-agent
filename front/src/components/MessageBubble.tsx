@@ -1,10 +1,18 @@
 import type { ChatMessage } from "../chat/model";
+import ClarifyOptions from "./ClarifyOptions";
 import Markdown from "./Markdown";
 import ToolCallCard from "./ToolCallCard";
 import "./MessageBubble.css";
 
-export default function MessageBubble({ message }: { message: ChatMessage }) {
+export default function MessageBubble({
+  message,
+  onClarifySelect,
+}: {
+  message: ChatMessage;
+  onClarifySelect?: (messageId: string, value: string, label: string) => void;
+}) {
   const isUser = message.role === "user";
+  const clarify = !isUser ? message.clarify : undefined;
 
   return (
     <div className={`bubble-row ${isUser ? "bubble-user" : "bubble-assistant"}`}>
@@ -38,6 +46,15 @@ export default function MessageBubble({ message }: { message: ChatMessage }) {
               <span className="artifact-size">（{(message.artifactSize / 1024).toFixed(1)} KB）</span>
             )}
           </a>
+        )}
+        {clarify && (
+          <ClarifyOptions
+            options={clarify.options}
+            selected={clarify.selected}
+            disabled={clarify.disabled === true || !onClarifySelect}
+            streaming={message.streaming}
+            onSelect={(value, label) => onClarifySelect?.(message.id, value, label)}
+          />
         )}
         {message.stopped && <div className="stopped-hint">已停止生成（后台仍在完成，刷新后可见完整结果）</div>}
         {message.error && <div className="bubble-error">{message.error}</div>}

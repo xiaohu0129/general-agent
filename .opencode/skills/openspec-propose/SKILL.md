@@ -116,7 +116,18 @@ When the user is ready to implement, they must start the apply workflow explicit
       - Ask the user to clarify
       - Then continue with creation
 
-6. **Show final status**
+6. **Traceability gate (design/spec → scenarios) — MUST run before showing final status**
+
+   This gate prevents the known failure where a design's cross-cutting promises (metrics, logging, quality annotations, degradation, audit) get flattened away when design.md is reduced to spec scenarios, so tasks/tests never cover them. `openspec validate --strict` checks spec *format* only; it CANNOT detect a design promise that has no scenario.
+
+   After design.md and the delta specs are written, build a traceability table and verify every row resolves:
+
+   - For **each Decision (D1..Dn)** in design.md and **each Risk mitigation** in "Risks / Trade-offs": locate the spec requirement + `#### Scenario` that proves it.
+   - Pay special attention to **non-behavioral / cross-cutting promises** (metrics, histogram, log annotations like `has_examples`, degradation fallbacks, audit fields) — these change no user-visible output and are the ones that silently drop. A promise written only as prose in a Requirement ("...to support X") with NO `#### Scenario: ... X ...` of its own counts as MISSING.
+   - Every row MUST resolve to one of: (a) an existing `#### Scenario` (cite it), or (b) an explicit Non-Goal / Open Question / "二期" deferral recorded in design.md. A Risk mitigation left as prose with neither is a gap — add the scenario or explicitly defer it.
+   - Do not show final status while any row is unresolved. Report the table outcome to the user (resolved count, any explicit deferrals).
+
+7. **Show final status**
    ```bash
    openspec status --change "<name>"
    ```

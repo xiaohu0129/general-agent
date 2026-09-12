@@ -13,6 +13,19 @@ export interface ToolCall {
   artifactKind?: string | null;
 }
 
+export interface ClarifyOption {
+  label: string;
+  value: string;
+}
+
+// 结构化澄清卡片状态：历史还原时由 options/selected 生成；
+// selected 命中与否由组件判定，模型只保证 selected 有值即整卡禁用
+export interface ChatClarify {
+  options: ClarifyOption[];
+  selected?: string;
+  disabled?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -26,4 +39,8 @@ export interface ChatMessage {
   offloaded?: boolean;
   artifactUrl?: string;
   artifactSize?: number | null;
+  // 结构化澄清选项（仅 assistant 可能有）
+  clarify?: ChatClarify;
+  // 消息来源：live=本次会话实时产生；restored=历史消息还原
+  source?: "live" | "restored";
 }

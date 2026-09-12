@@ -26,6 +26,8 @@ logger = get_logger(__name__)
 _LC_TO_ROLE = {"system": "system", "human": "user", "ai": "assistant", "tool": "tool"}
 # DB 行数硬上限，防止极端历史一次性载入过多；token 裁剪在 Python 侧做
 _HISTORY_ROW_LIMIT = 500
+# 误杀比对的收窄路径集合（degraded/fallback 全量、chitchat/clarify 无工具不计）
+_MISS_PATHS = {"rule", "vector", "llm", "option"}
 
 
 def _row_to_message(row: dict) -> BaseMessage:
@@ -143,6 +145,10 @@ async def run_turn(
     user_message: str,
     max_tool_rounds: int = 8,
     direct_reply: str | None = None,
+    clarify_meta: dict | None = None,
+    route_path: str | None = None,
+    recommended_tools: list[str] | None = None,
+    retrieval: str | None = None,
 ) -> AsyncIterator[dict]:
     tracer = observability.get_tracer()
     start = time.monotonic()
@@ -172,9 +178,13 @@ async def run_turn(
         # 路由澄清分支：不构建 ReAct 图、不调用业务工具，直接输出澄清文本作为 assistant 轮次。
         if direct_reply is not None:
             yield events.turn_delta(turn_id, trace_id, direct_reply)
+            clarify_options = (clarify_meta or {}).get("options")
+            if clarify_options:
+                yield events.clarify(turn_id, trace_id, direct_reply, clarify_options)
             with tracer.start_as_current_span("append_messages"):
                 await message_store.append_message(
-                    service, env, user, session_id, turn_id, "assistant", direct_reply
+                    service, env, user, session_id, turn_id, "assistant", direct_reply,
+                    meta=clarify_meta,
                 )
             observability.record_turn((time.monotonic() - start) * 1000, events.FINISH_REASON_STOP)
             yield events.turn_end(turn_id, trace_id, events.FINISH_REASON_STOP)
@@ -184,6 +194,29 @@ async def run_turn(
         new_messages: list[BaseMessage] = []
         persisted_tool_ids: set[str] = set()
         finish = events.FINISH_REASON_STOP
+        # 误杀比对：收窄路径 + 推荐集非空才启用；runner 只绑定 decision.tools，
+        # 集外调用是未绑定 tool_call（不发 on_tool_start/end），只能在 on_chat_model_end
+        # 的 AIMessage.tool_calls 里看到工具名，故在此比对计数
+        miss_check = (
+            route_path in _MISS_PATHS
+            and recommended_tools is not None
+            and len(recommended_tools) > 0
+        )
+        recommended = set(recommended_tools or [])
+
+        def _record_misses(ai: AIMessage) -> None:
+            # 按工具调用事件计数：单条 AIMessage 内多次越界调用各计一次；
+            # span 标注按名去重拼接，防同值膨胀
+            missed = [tc.get("name", "") for tc in ai.tool_calls if tc.get("name") not in recommended]
+            for _ in missed:
+                observability.record_intent_miss(route_path, retrieval=retrieval or "vector")
+            if missed:
+                uniq = list(dict.fromkeys(missed))
+                prev = getattr(turn_span, "attributes", {}).get("route.missed_tool")
+                turn_span.set_attribute(
+                    "route.missed_tool", f"{prev},{','.join(uniq)}" if prev else ",".join(uniq)
+                )
+
         try:
             with tracer.start_as_current_span("agent_graph"):
                 async for ev in agent.astream_events(
@@ -200,6 +233,8 @@ async def run_turn(
                         out = data.get("output")
                         if isinstance(out, AIMessage):
                             new_messages.append(out)
+                            if miss_check and out.tool_calls:
+                                _record_misses(out)
                     elif name == "on_tool_start":
                         inp = data.get("input")
                         args = inp if isinstance(inp, dict) else ({"input": str(inp)} if inp is not None else {})
@@ -207,7 +242,23 @@ async def run_turn(
                     elif name == "on_tool_end":
                         out = data.get("output")
                         result = _maybe_json(getattr(out, "content", out)) if out is not None else None
-                        yield events.tool_end(turn_id, trace_id, ev.get("run_id", ""), "success", result=result)
+                        is_error_tool = (
+                            isinstance(out, ToolMessage) and getattr(out, "status", None) == "error"
+                        )
+                        if is_error_tool:
+                            payload = result if isinstance(result, dict) else {}
+                            error_code = payload.get("errorCode") or "INTERNAL"
+                            if error_code == "MISSING_ARGS":
+                                # 缺参追问计数：守卫拦截（非业务错误），on_tool_error 路径不记
+                                observability.record_missing_args(ev.get("name", ""))
+                            yield events.tool_end(
+                                turn_id, trace_id, ev.get("run_id", ""), "error",
+                                result=result, error_code=error_code,
+                            )
+                        else:
+                            yield events.tool_end(
+                                turn_id, trace_id, ev.get("run_id", ""), "success", result=result
+                            )
                         if isinstance(out, ToolMessage) and out.tool_call_id not in persisted_tool_ids:
                             persisted_tool_ids.add(out.tool_call_id)
                             new_messages.append(out)

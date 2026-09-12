@@ -78,6 +78,8 @@ class MessageStore:
         content: str,
         tool_calls: list[dict] | None = None,
         tool_call_id: str | None = None,
+        *,
+        meta: dict | None = None,
     ) -> int:
         content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
         blob_store, threshold, head_chars = self._artifact_cfg()
@@ -110,8 +112,8 @@ class MessageStore:
         sql = (
             f"INSERT INTO {TABLE} "
             "(service, env, user_id, session_id, turn_id, role, content, tool_calls, "
-            "tool_call_id, content_ref, content_size, content_kind) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            "tool_call_id, meta, content_ref, content_size, content_kind) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         args = (
             service,
@@ -123,6 +125,7 @@ class MessageStore:
             stored_content,
             json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None,
             tool_call_id,
+            json.dumps(meta, ensure_ascii=False) if meta is not None else None,
             content_ref,
             content_size,
             content_kind,
@@ -145,14 +148,14 @@ class MessageStore:
         pool = await self._pool_obj()
         if limit is not None:
             sql = (
-                f"SELECT role, content, tool_calls, tool_call_id FROM {TABLE} "
+                f"SELECT role, content, tool_calls, tool_call_id, meta, turn_id FROM {TABLE} "
                 "WHERE service=%s AND env=%s AND user_id=%s AND session_id=%s "
                 "ORDER BY id DESC LIMIT %s"
             )
             args: tuple = (service, env, user_id, session_id, limit)
         else:
             sql = (
-                f"SELECT role, content, tool_calls, tool_call_id FROM {TABLE} "
+                f"SELECT role, content, tool_calls, tool_call_id, meta, turn_id FROM {TABLE} "
                 "WHERE service=%s AND env=%s AND user_id=%s AND session_id=%s "
                 "ORDER BY id ASC"
             )
@@ -166,6 +169,12 @@ class MessageStore:
         for r in rows:
             if r.get("tool_calls"):
                 r["tool_calls"] = json.loads(r["tool_calls"])
+            meta = r.get("meta")
+            if isinstance(meta, str):
+                try:
+                    r["meta"] = json.loads(meta)
+                except Exception:
+                    r["meta"] = None
         return list(rows)
 
     async def count_messages(
@@ -181,6 +190,38 @@ class MessageStore:
                 await cur.execute(sql, (service, env, user_id, session_id))
                 row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+    async def update_clarify_selected(
+        self,
+        service: str,
+        env: str,
+        user_id: str,
+        session_id: str,
+        turn_id: str,
+        selected: str,
+    ) -> int:
+        """点选回写：按归属键 + turn_id 定位 assistant 澄清行，把 selected 合并进 meta（不覆盖 options）。
+
+        selected 以 JSON 字符串字面量写入 JSON_SET；四归属键齐全防越权；返回更新行数。
+        """
+        pool = await self._pool_obj()
+        sql = (
+            f"UPDATE {TABLE} SET meta = JSON_SET(COALESCE(meta, '{{}}'), '$.selected', %s) "
+            "WHERE service=%s AND env=%s AND user_id=%s AND session_id=%s "
+            "AND turn_id=%s AND role='assistant'"
+        )
+        args = (
+            json.dumps(selected, ensure_ascii=False),
+            service,
+            env,
+            user_id,
+            session_id,
+            turn_id,
+        )
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, args)
+                return cur.rowcount
 
     async def load_web_messages(
         self,
@@ -201,7 +242,7 @@ class MessageStore:
         pool = await self._pool_obj()
         sql = (
             f"SELECT id, turn_id, role, content, tool_calls, tool_call_id, created_at, "
-            f"content_ref, content_size, content_kind FROM {TABLE} "
+            f"content_ref, content_size, content_kind, meta FROM {TABLE} "
             "WHERE service=%s AND env=%s AND user_id=%s AND session_id=%s"
         )
         args: list = [service, env, user_id, session_id]
@@ -228,6 +269,14 @@ class MessageStore:
                     tcs = json.loads(tcs)
                 except Exception:
                     tcs = None
+            meta = r.get("meta")
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = None
+            if not isinstance(meta, dict):
+                meta = None
             messages.append(
                 {
                     "messageId": r.get("id"),
@@ -240,6 +289,8 @@ class MessageStore:
                     "contentRef": r.get("content_ref"),
                     "contentSize": r.get("content_size"),
                     "contentKind": r.get("content_kind"),
+                    "options": (meta or {}).get("options"),
+                    "selected": (meta or {}).get("selected"),
                 }
             )
         return {"messages": messages, "nextCursor": next_cursor, "hasMore": has_more}

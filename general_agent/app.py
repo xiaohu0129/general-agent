@@ -21,6 +21,7 @@ from .message_store import MessageStore
 from .security import GovernanceError, TokenBucket
 from .skill_router import SkillRouter
 from .skill_router.index import SkillIndex
+from .skill_router.keyword import KeywordIndex
 from .skill_router.rules import RuleMatcher
 from .skills import build_registry
 from .turn_lock import TurnLockRegistry
@@ -32,7 +33,17 @@ logger = get_logger(__name__)
 async def _setup_skill_router(app: FastAPI, settings) -> None:
     """启动时构建 Skill 向量索引并装配 SkillRouter；routing.enabled=false 时不装配。"""
     app.state.skill_router = None
-    app.state.routing_status = {"enabled": False, "index_ready": False, "mode": "off", "embedding_model": ""}
+    app.state.routing_status = {
+        "enabled": False,
+        "index_ready": False,
+        "mode": "off",
+        "embedding_model": "",
+        "multi_vector": bool(settings.routing.multi_vector),
+        "hybrid": bool(settings.routing.hybrid),
+        "semantic": False,
+        "clarify_options": bool(settings.routing.clarify_options),
+        "no_examples_skills": [],
+    }
     if not settings.routing.enabled:
         return
     registry = app.state.skill_registry
@@ -43,18 +54,35 @@ async def _setup_skill_router(app: FastAPI, settings) -> None:
         model=emb_cfg.model,
         api_key=emb_cfg.api_key,
         timeout=emb_cfg.timeout,
+        batch_size=emb_cfg.batch_size,
     )
     # embedding 指向 stub（base_url 留空）时检索无语义，仅规则可用 -> 路由自动降级
     is_stub = not emb_cfg.base_url
-    index = SkillIndex(embedder, cache_dir=emb_cfg.cache_dir, model_id=emb_cfg.model)
+    index = SkillIndex(
+        embedder,
+        cache_dir=emb_cfg.cache_dir,
+        model_id=emb_cfg.model,
+        multi_vector=settings.routing.multi_vector,
+    )
     await index.build(all_skills)
-    mode = "rule+vector" if (index.ready and not is_stub) else ("rule-only" if index.ready else "degraded")
+    # mode：真实语义向量=rule+vector；stub 且 BM25 可用=rule+keyword；无关键词路=rule-only；索引失败=degraded
+    semantic = bool(index.ready and not is_stub)
+    if semantic:
+        mode = "rule+vector"
+    elif settings.routing.hybrid:
+        mode = "rule+keyword" if index.ready else "degraded"
+    else:
+        mode = "rule-only" if index.ready else "degraded"
     if is_stub or not index.ready:
         logger.warning(
             "skill_router_degraded",
             reason="embedding_endpoint_is_stub" if is_stub else "index_build_failed",
             hint="配置 embedding.base_url 为真实端点后向量检索才生效，当前仅规则/全量兜底",
         )
+    # BM25 关键词路：纯内存、同步构建、不落盘；hybrid=false 时不构建（双重保证）
+    keyword_index = None
+    if settings.routing.hybrid:
+        keyword_index = KeywordIndex().build(all_skills)
     router = SkillRouter(
         index=index,
         rule_matcher=RuleMatcher(settings.routing.rules),
@@ -63,13 +91,32 @@ async def _setup_skill_router(app: FastAPI, settings) -> None:
         top_k=settings.routing.top_k,
         score_threshold=settings.routing.score_threshold,
         margin=settings.routing.margin,
+        keyword_index=keyword_index,
+        hybrid=settings.routing.hybrid,
+        rrf_k=settings.routing.rrf_k,
+        keyword_top_k=settings.routing.keyword_top_k,
+        semantic=semantic,
+        context_turns=settings.routing.context_turns,
+        query_rewrite=settings.routing.query_rewrite,
+        refer_terms=settings.routing.refer_terms,
+        llm_conf_high=settings.routing.llm_conf_high,
+        clarify_options=settings.routing.clarify_options,
+        clarify_option_max=settings.routing.clarify_option_max,
     )
     app.state.skill_router = router
+    no_examples = index.skills_without_examples
+    if no_examples:
+        logger.warning("skill_router_no_examples", count=len(no_examples), skills=",".join(no_examples))
     app.state.routing_status = {
         "enabled": True,
         "index_ready": bool(index.ready),
         "mode": mode,
         "embedding_model": emb_cfg.model,
+        "multi_vector": bool(settings.routing.multi_vector),
+        "hybrid": bool(settings.routing.hybrid),
+        "semantic": semantic,
+        "clarify_options": bool(settings.routing.clarify_options),
+        "no_examples_skills": no_examples,
     }
 
 

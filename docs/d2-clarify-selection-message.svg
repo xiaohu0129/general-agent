@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 820" font-family="-apple-system,'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+    <marker id="aBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4d6bfe"/>
+    </marker>
+    <marker id="aGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2e9e5b"/>
+    </marker>
+    <marker id="aRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d9534f"/>
+    </marker>
+  </defs>
+
+  <text x="530" y="34" text-anchor="middle" font-size="19" font-weight="700" fill="#1f2329">缺陷2：点选选项时 message 填什么？——两个字段，各有消费者，模型看不到 value</text>
+
+  <!-- 请求体 -->
+  <rect x="360" y="56" width="340" height="74" rx="10" fill="#eef1ff" stroke="#4d6bfe" stroke-width="1.8"/>
+  <text x="530" y="82" text-anchor="middle" font-size="13.5" font-weight="700" fill="#2b3a67">POST /chat  请求体</text>
+  <text x="380" y="104" font-size="12.5" fill="#1f2329" font-family="Consolas,monospace">message: ???          </text>
+  <text x="380" y="122" font-size="12.5" fill="#1f2329" font-family="Consolas,monospace">clarify_selection: { value }</text>
+
+  <!-- 分叉 -->
+  <line x1="430" y1="130" x2="200" y2="170" stroke="#4d6bfe" stroke-width="1.8" marker-end="url(#aBlue)"/>
+  <line x1="630" y1="130" x2="830" y2="170" stroke="#2e9e5b" stroke-width="1.8" marker-end="url(#aGreen)"/>
+
+  <!-- 左：value 路径 -->
+  <rect x="60" y="172" width="300" height="150" rx="10" fill="#f0f4ff" stroke="#4d6bfe" stroke-width="1.6"/>
+  <text x="210" y="198" text-anchor="middle" font-size="14" font-weight="700" fill="#2b3a67">clarify_selection.value</text>
+  <text x="210" y="222" text-anchor="middle" font-size="12.5" fill="#1f2329">→ 路由层独占</text>
+  <text x="78" y="248" font-size="12" fill="#374151">1. 校验 ∈ prev_clarify.options</text>
+  <text x="78" y="268" font-size="12" fill="#374151">2. 再经 env 候选交集校验</text>
+  <text x="78" y="288" font-size="12" fill="#374151">3. 合法 → 跳过向量/LLM，确定性收窄</text>
+  <text x="78" y="308" font-size="12" font-weight="700" fill="#2b3a67">它只决定：模型能用哪些 tools</text>
+
+  <!-- 右：message 路径 -->
+  <rect x="700" y="172" width="310" height="150" rx="10" fill="#eafaf0" stroke="#2e9e5b" stroke-width="1.6"/>
+  <text x="855" y="198" text-anchor="middle" font-size="14" font-weight="700" fill="#1f6b41">message（人类可读）</text>
+  <text x="855" y="222" text-anchor="middle" font-size="12.5" fill="#1f2329">→ 三个消费者</text>
+  <text x="718" y="248" font-size="12" fill="#374151">① route()（选项路径不用它收窄）</text>
+  <text x="718" y="268" font-size="12" fill="#374151">② append_message 持久化 → 历史气泡</text>
+  <text x="718" y="288" font-size="12" fill="#374151">③ HumanMessage 喂 ReAct 模型</text>
+  <text x="718" y="308" font-size="12" font-weight="700" fill="#1f6b41">它决定：模型"读到"用户说了什么</text>
+
+  <!-- 汇聚到 agent -->
+  <line x1="210" y1="322" x2="430" y2="392" stroke="#4d6bfe" stroke-width="1.8" marker-end="url(#aBlue)"/>
+  <line x1="855" y1="322" x2="640" y2="392" stroke="#2e9e5b" stroke-width="1.8" marker-end="url(#aGreen)"/>
+
+  <rect x="330" y="394" width="400" height="120" rx="10" fill="#fff" stroke="#1f2329" stroke-width="1.8"/>
+  <text x="530" y="420" text-anchor="middle" font-size="14" font-weight="700" fill="#1f2329">build_agent(model, tools, system_prompt)</text>
+  <text x="530" y="446" text-anchor="middle" font-size="12.5" fill="#374151">模型收到：收窄后的 tools ＋ 消息历史（含本轮 HumanMessage）</text>
+  <rect x="360" y="462" width="340" height="40" rx="8" fill="#fdecec" stroke="#d9534f" stroke-width="1.6"/>
+  <text x="530" y="487" text-anchor="middle" font-size="12.5" font-weight="700" fill="#c0392b">模型收不到 clarify_selection —— 它只看得见 message 文本</text>
+
+  <line x1="530" y1="514" x2="530" y2="540" stroke="#6b7280" stroke-width="1.6" marker-end="url(#a2)"/>
+
+  <!-- 三种填法 -->
+  <text x="530" y="560" text-anchor="middle" font-size="14" font-weight="700" fill="#1f2329">message 三种填法的后果</text>
+
+  <!-- 选项A label -->
+  <rect x="40" y="576" width="320" height="200" rx="10" fill="#eafaf0" stroke="#2e9e5b" stroke-width="2"/>
+  <text x="200" y="602" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1f6b41">A. message = label「退款」✅ 推荐</text>
+  <text x="58" y="628" font-size="12" fill="#1f2329" font-family="Consolas,monospace">{message:"退款",</text>
+  <text x="58" y="646" font-size="12" fill="#1f2329" font-family="Consolas,monospace"> clarify_selection:{value:"category:refund"}}</text>
+  <text x="58" y="674" font-size="12" fill="#374151">• 历史气泡显示「退款」，自然</text>
+  <text x="58" y="694" font-size="12" fill="#374151">• 模型读到「退款」→ 知道用户所选</text>
+  <text x="58" y="714" font-size="12" fill="#374151">• 收窄到退款工具后，缺 order_id</text>
+  <text x="72" y="732" font-size="12" fill="#374151">→ D6 半槽位追问，链路通顺</text>
+  <text x="58" y="758" font-size="12" fill="#1f6b41" font-weight="700">value 管收窄，label 管"传话"，各司其职</text>
+
+  <!-- 选项B value -->
+  <rect x="375" y="576" width="320" height="200" rx="10" fill="#fff6e5" stroke="#f5a623" stroke-width="2"/>
+  <text x="535" y="602" text-anchor="middle" font-size="13.5" font-weight="700" fill="#8a5b00">B. message = value ⚠️</text>
+  <text x="393" y="628" font-size="12" fill="#1f2329" font-family="Consolas,monospace">{message:"category:refund",</text>
+  <text x="393" y="646" font-size="12" fill="#1f2329" font-family="Consolas,monospace"> clarify_selection:{value:"category:refund"}}</text>
+  <text x="393" y="674" font-size="12" fill="#374151">• 历史/模型看到机器码 category:refund</text>
+  <text x="393" y="694" font-size="12" fill="#374151">• 内部 category 名泄漏到用户可见记录</text>
+  <text x="393" y="714" font-size="12" fill="#374151">• 模型把 "category:refund" 当用户原话</text>
+  <text x="407" y="732" font-size="12" fill="#374151">语义噪声，可能误导</text>
+  <text x="393" y="758" font-size="12" fill="#8a5b00" font-weight="700">value 对前端本应是不透明、只回传的</text>
+
+  <!-- 选项C 空 -->
+  <rect x="710" y="576" width="310" height="200" rx="10" fill="#fdecec" stroke="#d9534f" stroke-width="2"/>
+  <text x="865" y="602" text-anchor="middle" font-size="13.5" font-weight="700" fill="#c0392b">C. message = "" ❌</text>
+  <text x="728" y="628" font-size="12" fill="#1f2329" font-family="Consolas,monospace">{message:"",</text>
+  <text x="728" y="646" font-size="12" fill="#1f2329" font-family="Consolas,monospace"> clarify_selection:{value:"category:refund"}}</text>
+  <text x="728" y="674" font-size="12" fill="#374151">• 工具确实收窄了（value 生效）</text>
+  <text x="728" y="694" font-size="12" fill="#c0392b" font-weight="700">• 但模型这一轮读到空 HumanMessage</text>
+  <text x="728" y="714" font-size="12" fill="#374151">  上一轮助手问"订单还是退款?"，</text>
+  <text x="728" y="732" font-size="12" fill="#374151">  这轮用户"什么都没说" → 模型失锚</text>
+  <text x="728" y="758" font-size="12" fill="#c0392b" font-weight="700">收窄了工具，模型却不知道要干什么</text>
+
+  <!-- 底部 value 命名空间 -->
+  <rect x="40" y="788" width="980" height="24" rx="6" fill="#eef1ff" stroke="#4d6bfe" stroke-width="1.2"/>
+  <text x="530" y="805" text-anchor="middle" font-size="12" fill="#2b3a67">附带子洞：value 须带类型前缀消歧——category:refund（→整域工具）vs skill:refund_apply（→单个工具），否则 category 与 skill 同名时收窄歧义；value 对前端不透明、原样回传即可。</text>
+</svg>

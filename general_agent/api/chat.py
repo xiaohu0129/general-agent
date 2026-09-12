@@ -28,9 +28,14 @@ router = APIRouter(tags=["chat"])
 logger = get_logger(__name__)
 
 
+class ClarifySelection(BaseModel):
+    value: str
+
+
 class ChatRequest(BaseModel):
     message: str
     sessionId: str | None = None
+    clarify_selection: ClarifySelection | None = None
 
 
 def _derive_trace_id(request: Request) -> str:
@@ -38,6 +43,67 @@ def _derive_trace_id(request: Request) -> str:
     if tid:
         return tid
     return request.headers.get("x-trace-id") or uuid4().hex
+
+
+async def _load_routing_context(message_store, settings, service, env, user, session_id):
+    """路由前载历史（升序）：拼接 history 与澄清闭环 prev_clarify 相互独立。
+
+    - history：最近 context_turns*2+1 行截取 user/assistant 文本行（跨轮拼接用），
+      context_turns=0 或无 store 时不读 -> None；
+    - prev_clarify：末条 assistant 行为澄清轮时据其 meta 构造（limit=1 收窄读取，
+      与 context_turns 解耦——关闭拼接不应连带关闭澄清闭环）；无 store -> None。
+    """
+    if message_store is None:
+        return None, None
+    n = settings.routing.context_turns
+    history = None
+    if n > 0:
+        rows = await message_store.load_messages(
+            service, env, user, session_id, limit=n * 2 + 1
+        )
+        history = [
+            {"role": r.get("role"), "content": r.get("content") or ""}
+            for r in rows
+            if r.get("role") in ("user", "assistant")
+        ]
+    prev_clarify = None
+    last = await message_store.load_messages(service, env, user, session_id, limit=1)
+    if last and last[-1].get("role") == "assistant":
+        meta = last[-1].get("meta")
+        if isinstance(meta, dict) and meta.get("kind") == "clarify":
+            prev_clarify = {
+                "categories": meta.get("categories"),
+                "options": meta.get("options") or [],
+                "turn_id": last[-1].get("turn_id"),
+            }
+    return history, prev_clarify
+
+
+def _derive_retrieval(details: dict) -> str:
+    """从路由 details 推导检索路标签：降级（BM25 收窄/语义关闭）记 keyword，否则 vector。"""
+    if "degraded_keyword" in details or details.get("semantic_off"):
+        return "keyword"
+    return "vector"
+
+
+def _serialize_details(details: dict) -> dict:
+    """details 展平为可回放标量：list/dict 序列化为紧凑字符串，标量原样保留。
+
+    span attributes 与审计日志仅接受标量；top_k/BM25/RRF/categories/clarify_options
+    等结构化检索结果是回放关键信息，MUST NOT 被标量过滤静默丢弃。
+    """
+    out: dict = {}
+    for k, v in details.items():
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            out[k] = v
+        elif isinstance(v, (list, dict)):
+            try:
+                out[k] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                out[k] = str(v)
+        else:
+            out[k] = str(v)
+    return out
 
 
 async def _produce(
@@ -58,6 +124,10 @@ async def _produce(
     user_message: str,
     max_tool_rounds: int,
     direct_reply: str | None = None,
+    clarify_meta: dict | None = None,
+    route_path: str | None = None,
+    recommended_tools: list[str] | None = None,
+    retrieval: str | None = None,
 ) -> None:
     """Producer：消费 run_turn 事件流 -> broker.distribute（分配 eventSeq + 入 ring + fan-out）。
 
@@ -87,6 +157,10 @@ async def _produce(
                 user_message=user_message,
                 max_tool_rounds=max_tool_rounds,
                 direct_reply=direct_reply,
+                clarify_meta=clarify_meta,
+                route_path=route_path,
+                recommended_tools=recommended_tools,
+                retrieval=retrieval,
             ):
                 await broker.distribute(session_id, ev)
     except Exception as exc:
@@ -154,20 +228,58 @@ async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(
     candidates = request.app.state.skill_registry.list_allowed(ctx)
     decision = None
     skill_router = getattr(request.app.state, "skill_router", None)
+    routing_history = None
+    prev_clarify = None
+    route_path: str | None = None
+    recommended_tools: list[str] | None = None
+    retrieval: str | None = None
     if skill_router is not None:
+        routing_history, prev_clarify = await _load_routing_context(
+            request.app.state.message_store, settings, service, env, user, session_id
+        )
         tracer = observability.get_tracer()
         with tracer.start_as_current_span("intent_route") as span:
-            decision = await skill_router.route(req.message, candidates)
+            decision = await skill_router.route(
+                req.message,
+                candidates,
+                history=routing_history,
+                prev_clarify=prev_clarify,
+                selection=(req.clarify_selection.value if req.clarify_selection else None),
+            )
             span.set_attribute("route_path", decision.path)
             span.set_attribute("route_candidate_count", len(candidates))
             span.set_attribute("route_tool_count", len(decision.tools))
             span.set_attribute("route_tools", ",".join(s.name for s in decision.tools))
-            for k, v in decision.details.items():
-                if isinstance(v, (str, int, float, bool)):
-                    span.set_attribute(f"route.{k}", v)
+            for k, v in _serialize_details(decision.details).items():
+                span.set_attribute(f"route.{k}", v)
         observability.record_intent_route(
             decision.path, category=str(decision.details.get("llm_category") or "")
         )
+        # 澄清闭环结局（仅上一轮澄清产生的 option/text/repeat；首轮澄清 details 无该键）
+        clarify_outcome = decision.details.get("clarify_outcome")
+        if clarify_outcome:
+            observability.record_clarify(clarify_outcome)
+        # 检索分数分布：vector 必记（有 top1），bm25/rrf 各自在 details 存在时记
+        details = decision.details
+        if details.get("top1_score") is not None and not details.get("semantic_off"):
+            observability.record_intent_score(
+                details["top1_score"], details.get("score_gap"), "vector"
+            )
+        bm25_k = details.get("bm25_k")
+        if isinstance(bm25_k, list) and bm25_k:
+            top = bm25_k[0]
+            if isinstance(top, dict) and "score" in top:
+                observability.record_intent_score(top["score"], None, "bm25")
+        rrf = details.get("rrf") or details.get("rrf_rewritten")
+        if isinstance(rrf, list) and rrf:
+            top = rrf[0]
+            if isinstance(top, dict) and "score" in top:
+                observability.record_intent_score(top["score"], None, "rrf")
+        # query 改写触发计数（成功/失败）
+        if details.get("query_rewritten"):
+            observability.record_intent_rewrite(result="success")
+        if details.get("query_rewrite_failed"):
+            observability.record_intent_rewrite(result="failed")
         audit(
             "intent_route",
             actor=user,
@@ -175,13 +287,47 @@ async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(
             resource=decision.path,
             trace_id=trace_id,
             tools=[s.name for s in decision.tools],
-            **{k: v for k, v in decision.details.items() if isinstance(v, (str, int, float, bool))},
+            recommended_tools=",".join(s.name for s in decision.tools),
+            **_serialize_details(decision.details),
         )
-        tools = [s.to_tool(ctx) for s in decision.tools]
+        tools = [s.to_tool(ctx, arg_guard=settings.routing.arg_guard) for s in decision.tools]
+        # 误杀比对装配：收窄路径带 path/推荐集/检索路，degraded/fallback 全量不上报
+        if decision.path in ("rule", "vector", "llm", "option"):
+            route_path = decision.path
+            recommended_tools = [s.name for s in decision.tools]
+            retrieval = _derive_retrieval(decision.details)
     else:
-        tools = [s.to_tool(ctx) for s in candidates]
+        tools = [s.to_tool(ctx, arg_guard=settings.routing.arg_guard) for s in candidates]
     agent = build_agent(request.app.state.model, tools, system_prompt=settings.agent.system_prompt)
     direct_reply = decision.clarify_text if decision is not None else None
+    clarify_meta = None
+    if decision is not None and decision.path == "clarify":
+        categories = decision.details.get("categories")
+        if not categories:
+            categories = sorted({s.category for s in candidates if s.category})
+        clarify_meta = {
+            "kind": "clarify",
+            "categories": categories,
+            "options": decision.clarify_options
+            if decision.clarify_options is not None
+            else (decision.details.get("clarify_options") or []),
+        }
+
+    # 选项确定性收窄成功：把所选项回写到上一轮澄清行 meta.selected（best-effort，不杀轮次）
+    if decision is not None and decision.path == "option" and prev_clarify:
+        message_store = request.app.state.message_store
+        if message_store is not None:
+            try:
+                await message_store.update_clarify_selected(
+                    service,
+                    env,
+                    user,
+                    session_id,
+                    prev_clarify["turn_id"],
+                    decision.details.get("clarify_selection"),
+                )
+            except Exception as exc:
+                logger.warning("update_clarify_selected_failed", error=str(exc), sessionId=session_id)
 
     broker: Broker = request.app.state.broker
     # 先订阅再 spawn producer，确保 turn_start 不丢
@@ -204,6 +350,10 @@ async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(
             user_message=req.message,
             max_tool_rounds=request.app.state.max_tool_rounds,
             direct_reply=direct_reply,
+            clarify_meta=clarify_meta,
+            route_path=route_path,
+            recommended_tools=recommended_tools,
+            retrieval=retrieval,
         )
     )
     # 同步持有 task 引用，防止 chat 返回后 producer 被 GC（asyncio 官方建议）；
