@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 
 # 在 app import 前设 env，关闭 console 导出 + 关闭治理
 os.environ.setdefault("AGENT_OBSERVABILITY__ENABLED", "false")
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 from general_agent.app import create_app
 from general_agent.broker import Broker
 from general_agent.llm import OpenAICompatibleModel
+from general_agent.message_store import _tool_status
 from general_agent.security import TokenBucket
 from general_agent.skills import Skill, SkillContext
 
@@ -103,6 +105,7 @@ class FakeStore:
                     "contentRef": r.get("content_ref"),
                     "contentSize": r.get("content_size"),
                     "contentKind": r.get("content_kind"),
+                    "status": _tool_status(r.get("content") or "") if r["role"] == "tool" else None,
                     "options": meta.get("options"),
                     "selected": meta.get("selected"),
                 }
@@ -130,6 +133,75 @@ class FakeStore:
 
     async def get_artifact(self, *a, **k):
         return None
+
+
+class FakeChatSessions:
+    """内存版 agent_chat_session：完整接口（含 claim_if_absent/get_owned_scoped）。
+
+    claim 模拟 INSERT IGNORE 原子语义：已存在且四元组归属一致 -> 幂等返回行；
+    已属其他身份 -> None（不覆盖）；不存在 -> 插入并返回行。
+    """
+
+    def __init__(self):
+        self.sessions: dict[str, dict] = {}
+
+    async def create(self, uid, service, env, title, session_id=None):
+        sid = session_id or uuid.uuid4().hex
+        self.sessions[sid] = {
+            "session_id": sid, "uid": uid, "service": service, "env": env,
+            "title": (title or "新会话")[:128],
+        }
+        return {"sessionId": sid, "title": title, "createdAt": None, "updatedAt": None}
+
+    async def list_for_user(self, uid, limit=50):
+        return [
+            {"sessionId": s["session_id"], "title": s["title"], "createdAt": None, "updatedAt": None}
+            for s in self.sessions.values() if s["uid"] == uid
+        ]
+
+    async def get_owned(self, session_id, uid):
+        s = self.sessions.get(session_id)
+        return s if (s and s["uid"] == uid) else None
+
+    async def get_owned_scoped(self, session_id, service, env, uid):
+        s = self.sessions.get(session_id)
+        if s and s["uid"] == uid and s["service"] == service and s["env"] == env:
+            return s
+        return None
+
+    async def claim_if_absent(self, session_id, service, env, uid, title):
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            if (
+                existing["uid"] == uid
+                and existing["service"] == service
+                and existing["env"] == env
+            ):
+                return existing
+            return None
+        row = {
+            "session_id": session_id, "uid": uid, "service": service, "env": env,
+            "title": (title or "新会话")[:128],
+        }
+        self.sessions[session_id] = row
+        return row
+
+    async def rename(self, session_id, uid, title):
+        s = self.sessions.get(session_id)
+        if s and s["uid"] == uid and title.strip():
+            s["title"] = title
+            return True
+        return False
+
+    async def delete(self, session_id, uid):
+        s = self.sessions.get(session_id)
+        if s and s["uid"] == uid:
+            del self.sessions[session_id]
+            return True
+        return False
+
+    async def touch(self, session_id):
+        pass
 
 
 class DemoSkillError(Exception):
@@ -223,6 +295,8 @@ def build_test_app(llm_transport=None, store=None, broker=None, rate_limiter=Non
     app.state.message_store = store
     app.state.broker = broker or Broker(ring_size=16, sub_queue_size=64)
     app.state.rate_limiter = rate_limiter or TokenBucket(rate=1000, capacity=1000)
+    # 全鉴权模式统一 owner 校验：默认注入内存 fake，避免 disabled/api_key 测试打到真实 MySQL
+    app.state.chat_sessions = FakeChatSessions()
     return app, store, app.state.broker
 
 

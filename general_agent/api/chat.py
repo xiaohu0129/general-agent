@@ -11,7 +11,7 @@ import json
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .. import events, observability
@@ -21,15 +21,23 @@ from ..config import get_settings
 from ..logging_setup import get_logger
 from ..runner import run_turn
 from ..security import GovernanceError, Identity, audit, governance_dep
-from ..session import SessionStore, session_key
 from ..skills import SkillContext
 
 router = APIRouter(tags=["chat"])
 logger = get_logger(__name__)
 
 
+def session_key(service: str, env: str, user: str) -> str:
+    """无 sessionId 时的稳定隐式 ID（隔离维度 service+env+user）。"""
+    return f"{service}:{env}:{user}"
+
+
+def _first_line_title(message: str) -> str:
+    return message.strip().splitlines()[0][:20] if message.strip() else "新会话"
+
+
 class ClarifySelection(BaseModel):
-    value: str
+    value: str = Field(max_length=200)
 
 
 class ChatRequest(BaseModel):
@@ -182,14 +190,23 @@ async def _produce(
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(governance_dep)):
     service, env, user = identity.service, identity.env, identity.user
+    # 消息体边界先于归属 claim/历史读取/路由/LLM/broker/落库：空消息或超长在此即拒，
+    # 不得产生 owner 行等任何副作用（strip 长度语义 pydantic Field 无法表达，显式判断）
+    stripped_message = req.message.strip()
+    if not 1 <= len(stripped_message) <= 8000:
+        raise GovernanceError(400, "VALIDATION", "message 去除首尾空白后长度须在 1~8000 字符之间")
     settings = get_settings()
+    auth_mode = settings.security.auth_mode
 
-    # session 模式（Web 登录）：多会话——传了 sessionId 做归属校验；没传则预生成 ID，
-    # 会话行由 producer 在锁内创建（见 _produce），避免请求极早断开留下空孤儿会话。
-    chat_sessions = request.app.state.chat_sessions if settings.security.auth_mode == "session" else None
+    # 会话归属四情形（owner 权威为 MySQL agent_chat_session，不依赖可选 Redis）：
+    # 1. session 模式 + 无 sessionId：预生成 ID，会话行仍由 producer 在 turn 锁内创建；
+    # 2. session 模式 + 有 sessionId：get_owned(uid)，未知/越权 -> 404（不做无主认领）；
+    # 3/4. api_key/disabled ± sessionId：进入路由前 claim（INSERT IGNORE 先到先得），
+    #    无 sid 用 session_key 隐式稳定 id（升级前历史会话由原身份认领）；已属他人 -> 404。
+    chat_sessions = request.app.state.chat_sessions
     create_session = False
     session_title = ""
-    if settings.security.auth_mode == "session":
+    if auth_mode == "session":
         if req.sessionId:
             owned = await chat_sessions.get_owned(req.sessionId, user)
             if owned is None:
@@ -198,11 +215,15 @@ async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(
         else:
             session_id = uuid4().hex
             create_session = True
-            session_title = (
-                req.message.strip().splitlines()[0][:20] if req.message.strip() else "新会话"
-            )
+            session_title = _first_line_title(req.message)
     else:
         session_id = req.sessionId or session_key(service, env, user)
+        # claim 必须先于任何历史读取/模型调用：越权请求在此即 404，不留读/写痕迹
+        owned = await chat_sessions.claim_if_absent(
+            session_id, service, env, user, _first_line_title(req.message)
+        )
+        if owned is None:
+            raise GovernanceError(404, "SESSION_NOT_FOUND", "会话不存在")
 
     turn_id = uuid4().hex
     trace_id = _derive_trace_id(request)
@@ -210,13 +231,6 @@ async def chat(req: ChatRequest, request: Request, identity: Identity = Depends(
     logger.info("chat_turn_start", turnId=turn_id, sessionId=session_id, service=service, env=env, user=user)
 
     heartbeat = settings.broker.heartbeat_interval
-
-    # 会话 owner 落 Redis（best-effort）
-    if settings.redis.nodes or settings.redis.url:
-        try:
-            await SessionStore().save_session(session_id, service=service, env=env, user=user)
-        except Exception as exc:
-            logger.warning("save_session_failed", error=str(exc), sessionId=session_id)
 
     # 按 env 过滤 Skill -> Skill 意图路由（规则/向量/LLM 兜底/澄清）收窄工具集 -> 每请求重建 agent
     ctx = SkillContext(

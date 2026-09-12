@@ -51,7 +51,7 @@ routing:
 agent:
   # 工具调用轮数上限；超出触发 GraphRecursionError -> turn_end{finishReason:"max_tool_rounds"}
   max_tool_rounds: 8
-  # 上下文 token 预算，超出则 trim（token 估算用 len(content)//4 粗估）
+  # 上下文 token 预算，超出则 trim（估算：CJK 字符每字约 1 token，其余按 len//4）
   max_context_tokens: 24000
   context_strategy: "trim"  # trim | trim_then_summarize（summarize 需额外 LLM 调用，预留）
   summarize_threshold: 0.5  # 触发摘要的历史占比阈值（预留）
@@ -60,9 +60,10 @@ agent:
 
 broker:
   # 事件中枢 Broker + 心跳配置
-  ring_size: 256  # 每会话 ring buffer 容量（续传窗口）
+  ring_size: 2048  # 每会话 ring buffer 容量（续传窗口；token 级 turn_delta 下 256 不足一个长回复）
   sub_queue_size: 1024  # 订阅者队列容量（背压阈值）
   heartbeat_interval: 15.0  # 心跳间隔，须 < 链路最短 idle 超时（网关 60s）
+  session_ttl: 86400  # 会话事件状态空闲回收秒数：无订阅者且超时无新事件则清除 seq/ring（默认 24h）
 
 security:
   # 治理与安全
@@ -83,9 +84,14 @@ security:
     enabled: true
     rps: 5.0  # 每秒补充令牌数
     burst: 10  # 桶容量（允许突发）
+  register_rate:
+    enabled: true
+    rps: 0.167  # 每秒补充令牌数（约 10 次/分钟），按客户端 IP 限制 /auth/register
+    burst: 5  # 桶容量（允许突发）
 
 redis:
-  # 集群填 host:port 逗号分隔（如 h1:6379,h2:6379）；单机填 url 即可；留空=不启用（会话元数据/多实例 Broker 不生效）
+  # 集群填 host:port 逗号分隔（如 h1:6379,h2:6379）；单机填 url 即可；留空=不启用。
+  # 当前 Redis 仅用于可选的健康探测并为未来多实例预留：单实例下 Broker/登录态/会话归属均不依赖 Redis。
   nodes: ""
   url: ""
   ssl: false
@@ -99,6 +105,7 @@ mysql:
   password: ""
   database: "general_agent"
   pool_size: 5
+  pool_recycle: 1800  # 连接回收秒数（默认 1800s），周期回收旧连接，防云 MySQL/防火墙静默断开空闲连接
 
 artifacts:
   # 大产物外置存储（Tier2 blob）：超大工具结果/胖结果不内联 MySQL，写本地 blob 目录，消息行只存 head+引用

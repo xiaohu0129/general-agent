@@ -16,9 +16,15 @@ async def health(request: Request) -> dict:
     settings = get_settings()
     redis_status = "not_configured"
     if settings.redis.nodes or settings.redis.url:
-        redis_status = await _ping_redis()
+        try:
+            redis_status = await _ping_redis()
+        except Exception as exc:
+            logger.warning("health_redis_probe_failed", error=str(exc))
+            redis_status = "error"
+    routing_status = getattr(request.app.state, "routing_status", {}) or {}
+    degraded = redis_status == "error" or routing_status.get("mode") == "degraded"
     return {
-        "status": "ok",
+        "status": "degraded" if degraded else "ok",
         "service": "general-agent",
         "version": __version__,
         "llm": {
@@ -31,7 +37,7 @@ async def health(request: Request) -> dict:
             "otlp_endpoint": settings.observability.otlp.endpoint or "",
             "initialized": observability.is_enabled(),
         },
-        "routing": getattr(request.app.state, "routing_status", {}),
+        "routing": routing_status,
     }
 
 

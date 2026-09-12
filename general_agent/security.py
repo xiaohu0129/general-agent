@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from fastapi import HTTPException, Request, Response
@@ -17,6 +18,10 @@ from .config import get_settings
 from .logging_setup import get_logger
 
 audit_logger = get_logger("audit")
+
+# 懒清扫成本阈值：key 数达到该值后才允许扫描，间隔动态取 max(阈值, 留存 key 数)，
+# 把 O(n) 清扫摊销为每次 allow O(1)；key 数低于阈值时内存本身有界。
+SWEEP_MIN_KEYS = 64
 
 
 class GovernanceError(HTTPException):
@@ -102,13 +107,45 @@ def audit(action: str, *, actor: str, env: str, resource: str = "", trace_id: st
 class TokenBucket:
     """单机内存令牌桶，按 key 独立计数；多实例可替换为 Redis（Lua 原子脚本）。"""
 
-    def __init__(self, rate: float, capacity: int) -> None:
+    def __init__(
+        self,
+        rate: float,
+        capacity: int,
+        time_func: Callable[[], float] | None = None,
+    ) -> None:
         self.rate = rate
         self.capacity = capacity
+        self._time = time_func or time.monotonic
         self._state: dict[str, tuple[float, float]] = {}
+        self._ops_since_sweep = 0
+        self._sweep_interval = SWEEP_MIN_KEYS
+
+    def sweep(self, now: float | None = None) -> int:
+        """清除超过一个完整补充窗口（capacity/rate 秒）未活跃的 key，返回清除数。
+
+        rate<=0（不补充的防御配置）时窗口无定义，不扫描。
+        """
+        if self.rate <= 0:
+            return 0
+        now = time.monotonic() if now is None else now
+        window = self.capacity / self.rate
+        stale = [k for k, (_, last) in self._state.items() if now - last > window]
+        for k in stale:
+            del self._state[k]
+        return len(stale)
+
+    def _maybe_sweep(self, now: float) -> None:
+        if self.rate <= 0:
+            return
+        self._ops_since_sweep += 1
+        if len(self._state) >= SWEEP_MIN_KEYS and self._ops_since_sweep >= self._sweep_interval:
+            self.sweep(now)
+            self._ops_since_sweep = 0
+            self._sweep_interval = max(SWEEP_MIN_KEYS, len(self._state))
 
     def allow(self, key: str, cost: float = 1.0) -> bool:
-        now = time.monotonic()
+        now = self._time()
+        self._maybe_sweep(now)
         tokens, last = self._state.get(key, (float(self.capacity), now))
         tokens = min(self.capacity, tokens + (now - last) * self.rate)
         if tokens >= cost:

@@ -102,6 +102,71 @@ def test_token_bucket_independent_keys():
     assert tb.allow("a") is False
 
 
+class _FakeClock:
+    def __init__(self, start=1000.0):
+        self.t = start
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+def test_token_bucket_sweep_removes_stale_keys_keeps_active():
+    from general_agent.security import SWEEP_MIN_KEYS
+
+    clock = _FakeClock()
+    tb = TokenBucket(rate=1.0, capacity=2, time_func=clock)  # 完整补充窗口 = 2s
+    stale = [f"k{i}" for i in range(SWEEP_MIN_KEYS + 4)]
+    for k in stale:
+        assert tb.allow(k) is True
+    clock.advance(5.0)  # 超过完整补充窗口
+    assert tb.allow("active") is True  # 新请求；桶应为满（语义等价于全新 key）
+    assert tb.allow("active") is True
+    assert tb.allow("active") is False  # 突发耗尽，限流语义不变
+    removed = tb.sweep(clock())
+    assert removed == len(stale)
+    for k in stale:
+        assert k not in tb._state
+    assert "active" in tb._state  # 窗口内活跃 key 保留
+
+
+def test_token_bucket_lazy_sweep_triggers_through_allow():
+    from general_agent.security import SWEEP_MIN_KEYS
+
+    clock = _FakeClock()
+    tb = TokenBucket(rate=100.0, capacity=1, time_func=clock)  # 窗口 0.01s
+    stale = [f"k{i}" for i in range(SWEEP_MIN_KEYS + 4)]
+    for k in stale:
+        tb.allow(k)
+    clock.advance(1.0)
+    # 不直接调 sweep：持续 allow（摊销条件）触发懒清扫；活跃 key 反复访问不被清
+    for _ in range(len(stale) + 1):
+        assert tb.allow("live") is True
+        clock.advance(0.02)  # live 每次都在窗口内；stale 早已超窗口
+    assert len(tb._state) < len(stale)
+    for k in stale[:5]:
+        assert k not in tb._state
+    assert "live" in tb._state
+
+
+def test_token_bucket_rate_zero_never_sweeps():
+    from general_agent.security import SWEEP_MIN_KEYS
+
+    clock = _FakeClock()
+    tb = TokenBucket(rate=0.0, capacity=1, time_func=clock)  # 防御情形：不补充也不扫
+    keys = [f"k{i}" for i in range(SWEEP_MIN_KEYS + 4)]
+    for k in keys:
+        tb.allow(k)
+    clock.advance(3600.0)
+    for _ in range(len(keys) + 2):
+        tb.allow("live")
+    for k in keys:
+        assert k in tb._state  # rate=0 时窗口无穷大，MUST NOT 清扫
+
+
+
 # ---------------- 脱敏 ----------------
 def test_is_sensitive_keys():
     assert _is_sensitive("api_key")

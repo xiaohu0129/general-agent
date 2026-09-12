@@ -12,22 +12,89 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
+from collections.abc import Callable
 
 from . import events
 from .logging_setup import get_logger
 
 logger = get_logger(__name__)
 
+DEFAULT_RING_SIZE = 2048
+DEFAULT_SESSION_TTL = 86400.0
+# 懒扫描成本阈值：维护会话数达到该值后才允许扫描；两次扫描间至少隔
+# max(阈值, 上次扫描后留存会话数) 次入口操作，把 O(n) 扫描摊销为每事件 O(1)；
+# 会话数低于阈值时内存本身有界。
+SWEEP_MIN_SESSIONS = 64
+
 
 class Broker:
-    def __init__(self, ring_size: int = 256, sub_queue_size: int = 1024) -> None:
+    def __init__(
+        self,
+        ring_size: int = DEFAULT_RING_SIZE,
+        sub_queue_size: int = 1024,
+        session_ttl: float = DEFAULT_SESSION_TTL,
+        time_func: Callable[[], float] | None = None,
+    ) -> None:
         self._ring_size = ring_size
         self._sub_queue_size = sub_queue_size
+        self._session_ttl = session_ttl
+        self._time = time_func or time.monotonic
         self._seq: dict[str, int] = {}
         self._ring: dict[str, deque] = {}
         self._subs: dict[str, set[asyncio.Queue]] = {}
+        self._last_active: dict[str, float] = {}
+        self._ops_since_sweep = 0
+        self._sweep_interval = SWEEP_MIN_SESSIONS
         self._drops = 0
+
+    @property
+    def ring_size(self) -> int:
+        return self._ring_size
+
+    @property
+    def session_ttl(self) -> float:
+        return self._session_ttl
+
+    def sweep(self, now: float | None = None) -> int:
+        """清除"无订阅者且空闲超过 session_ttl"的会话状态，返回回收会话数。"""
+        now = self._time() if now is None else now
+        reclaimed = 0
+        for sid in list(set(self._last_active) | set(self._subs)):
+            if self._subs.get(sid):  # 有活跃订阅者 MUST NOT 回收
+                continue
+            last = self._last_active.get(sid)
+            if last is not None and now - last > self._session_ttl:
+                self._seq.pop(sid, None)
+                self._ring.pop(sid, None)
+                self._last_active.pop(sid, None)
+                self._subs.pop(sid, None)
+                reclaimed += 1
+        return reclaimed
+
+    def _tracked_sessions(self) -> int:
+        """维护会话数的 O(1) 上界近似（仅用于门控，不用于回收判定）。
+
+        真实并集规模 ∈ [max, 2·max]：最坏只在阈值附近多触发一次 O(n) 扫描，
+        扫描本身的 TTL+订阅判定不变，故对正确性零影响；避免每事件构造并集。
+        """
+        return max(len(self._last_active), len(self._subs))
+
+    def _maybe_sweep(self) -> None:
+        """distribute/subscribe 入口懒扫描：达阈值且距上次扫描满一个动态间隔才扫。
+
+        门控全程 O(1)（仅两次 len）；间隔 = max(阈值, 上次扫描后留存会话数)，
+        使 O(n) 扫描摊销为每事件 O(1)；会话数低于阈值时内存本身有界，不扫描。
+        """
+        self._ops_since_sweep += 1
+        if (
+            self._tracked_sessions() >= SWEEP_MIN_SESSIONS
+            and self._ops_since_sweep >= self._sweep_interval
+        ):
+            self.sweep()
+            self._ops_since_sweep = 0
+            self._sweep_interval = max(SWEEP_MIN_SESSIONS, self._tracked_sessions())
 
     def next_seq(self, session_id: str) -> int:
         seq = self._seq.get(session_id, 0) + 1
@@ -41,10 +108,12 @@ class Broker:
 
     async def distribute(self, session_id: str, raw_event: dict) -> dict:
         """分配 eventSeq -> 入 ring -> fan-out 订阅者（返回带 seq 的事件）。"""
+        self._maybe_sweep()
         seq = self.next_seq(session_id)
         ev = events.with_seq(raw_event, seq)
         ring = self._ring.setdefault(session_id, deque(maxlen=self._ring_size))
         ring.append(ev)
+        self._last_active[session_id] = self._time()
         for q in list(self._subs.get(session_id, ())):
             try:
                 q.put_nowait(ev)
@@ -54,6 +123,7 @@ class Broker:
         return ev
 
     async def subscribe(self, session_id: str) -> asyncio.Queue:
+        self._maybe_sweep()
         q: asyncio.Queue = asyncio.Queue(maxsize=self._sub_queue_size)
         self._subs.setdefault(session_id, set()).add(q)
         return q

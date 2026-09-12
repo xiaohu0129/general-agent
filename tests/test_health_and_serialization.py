@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 from langchain_core.messages import HumanMessage
 
 from conftest import build_test_app, make_llm_transport, parse_sse
@@ -181,6 +182,87 @@ def test_health_routing_hybrid_off_mode(monkeypatch):
     r = data["routing"]
     assert r["hybrid"] is False
     assert r["mode"] == "rule-only"  # stub 且 BM25 关 -> 仅规则
+
+
+# ---------------- 10.1 health 聚合 status ----------------
+def test_health_status_ok_when_no_redis_and_routing_off():
+    app, _, _ = build_test_app()
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["redis"] == "not_configured"
+    assert data["routing"]["mode"] == "off"
+    assert data["status"] == "ok"
+
+
+@pytest.mark.parametrize("mode", ["off", "rule-only", "rule+keyword", "rule+vector"])
+def test_health_status_ok_for_non_degraded_routing_modes(mode):
+    app, _, _ = build_test_app()
+    app.state.routing_status = {"enabled": mode != "off", "mode": mode}
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["routing"]["mode"] == mode
+    assert data["status"] == "ok"  # 主动 stub（rule+keyword 等）不算降级
+
+
+def test_health_status_degraded_when_redis_ping_error(monkeypatch):
+    from general_agent import config as config_mod
+    from general_agent.api import health as health_mod
+
+    app, _, _ = build_test_app()
+    settings = config_mod.get_settings()
+    monkeypatch.setattr(settings.redis, "url", "redis://unreachable:6379")
+
+    async def _ping_error():
+        return "error"
+
+    monkeypatch.setattr(health_mod, "_ping_redis", _ping_error)
+
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 200  # 降级也绝不 5xx
+    data = resp.json()
+    assert data["redis"] == "error"
+    assert data["status"] == "degraded"
+
+
+def test_health_status_degraded_when_routing_mode_degraded():
+    app, _, _ = build_test_app()
+    app.state.routing_status = {"enabled": True, "mode": "degraded"}
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["routing"]["mode"] == "degraded"
+    assert data["status"] == "degraded"
+
+
+def test_health_endpoint_200_when_probe_raises(monkeypatch):
+    from general_agent import config as config_mod
+    from general_agent.api import health as health_mod
+
+    app, _, _ = build_test_app()
+    settings = config_mod.get_settings()
+    monkeypatch.setattr(settings.redis, "nodes", "localhost:6379")
+
+    async def _boom():
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(health_mod, "_ping_redis", _boom)
+
+    from fastapi.testclient import TestClient
+
+    resp = TestClient(app).get("/health")  # 探测自身异常 MUST NOT 拖垮端点
+    assert resp.status_code == 200
+    assert resp.json()["redis"] == "error"
+    assert resp.json()["status"] == "degraded"
 
 
 # ---------------- 9.3 details 可回放序列化 ----------------

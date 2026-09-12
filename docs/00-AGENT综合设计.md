@@ -159,7 +159,9 @@ LangGraph 的 stream 事件（状态更新、工具调用开始/结束、token �
 
 同进程内解耦执行与 SSE 推送：执行慢/卡不阻塞推送；推送断了我还能继续跑、结果不丢。内存 queue（会话生命期几分钟，零序列化零网络，延迟最低）；多实例时完成通知经 Redis Pub/Sub 路由到持有连接的实例。
 
-> ✅ **RedisBroker 已实现**（`general_agent/redis_broker.py`）：Redis INCR 序列（跨实例唯一递增）、Redis List 环形缓冲（LTRIM 滑动窗口）、Redis Pub/Sub 跨实例通知广播。与 `Broker` 接口一致，可 drop-in 替换。9 项单测通过。
+> ⚠️ **历史记录，已变更（2026-09 platform-hardening-fixes）**：下列"RedisBroker 已实现"为里程碑存档——该模块从未被 app 装配，且存在 replay 同步/异步签名不兼容、notification 自发自收双投、listener 无重连、turn 事件不走 Pub/Sub、key 无 TTL 五个硬伤，已随该变更删除（见 `01-AGENT实现设计.md` §十 R2）；多实例事件中枢以独立变更重新交付，交付前提见 `03-部署方案.md` 文末 backlog。
+>
+> ~~✅ **RedisBroker 已实现**（`general_agent/redis_broker.py`）：Redis INCR 序列（跨实例唯一递增）、Redis List 环形缓冲（LTRIM 滑动窗口）、Redis Pub/Sub 跨实例通知广播。与 `Broker` 接口一致，可 drop-in 替换。9 项单测通过。~~
 
 ```
 producer(执行) -> asyncio.Queue -> consumer(SSE 推送)
@@ -457,7 +459,7 @@ LangGraph -> ChatModel 适配层(langchain-core) -> HTTP -> OpenAI 兼容端点(
 | B. 落库游标（eventSeq 持久） | 重启不丢 | 每事件落库 IO |
 | C. Redis 滑动窗口 | 跨实例、TTL 自动清理 | 每事件一跳 Redis |
 
-**选择**：**分阶段（A 单实例先行，C 多实例扩展）**。理由：当前单实例用内存 ring buffer（零序列化零网络、延迟最低）；多实例下「持有连接的实例」可能变，续传重放须跨实例可见，届时切 Redis 滑动窗口（List+TTL）+ Pub/Sub 通知广播，**Broker 接口不变**（见 01-AGENT实现设计 §1.4）。`notification` 离线未读可落 MySQL。eventSeq 单实例由 Broker 内存 `next_seq`，多实例由 SessionStore `next_event_seq`（Redis INCR）提供。
+**选择**：**分阶段（A 单实例先行，C 多实例扩展）**。理由：当前单实例用内存 ring buffer（零序列化零网络、延迟最低）；多实例下「持有连接的实例」可能变，续传重放须跨实例可见，届时切 Redis 滑动窗口（List+TTL）+ Pub/Sub 通知广播，**Broker 接口不变**（见 01-AGENT实现设计 §1.4）。`notification` 离线未读可落 MySQL。eventSeq 单实例由 Broker 内存 `next_seq` 提供（多实例的 SessionStore `next_event_seq`（Redis INCR）为只写不读半成品，已随 2026-09 platform-hardening-fixes 删除，见 01 §十 R2）。
 
 ### 10.5 多租户隔离强度
 
@@ -494,7 +496,7 @@ LangGraph -> ChatModel 适配层(langchain-core) -> HTTP -> OpenAI 兼容端点(
 | 服务间鉴权 | ✅ 已实现 | 治理鉴权 `disabled`/`api_key`/`session`（`jwt` 预留 fail-closed）+ 网关信任模式；Web 登录认证见 02；mTLS 为生产前置网关纵深 |
 | 业务 Skill 接入 | P1 | 业务方实现 Skill 子类并在 `build_registry()` 注册，客户端注入 `app.state.services` |
 | 真实 LLM 端点切换 | P1 | stub_llm 换 `llm.base_url`/`llm.api_key`/`llm.model` |
-| 多实例 Redis 升级 | P2 | seq/ring/notify 切 Redis（`RedisBroker` 已实现，接线即可） |
+| 多实例 Redis 升级 | P2 | seq/ring/notify 切 Redis（backlog：重新设计交付，前提见 03 文末；原 RedisBroker 已删除，见 01 §十 R2） |
 
 ---
 

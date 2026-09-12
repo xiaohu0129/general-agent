@@ -107,3 +107,17 @@
 
 - **WHEN** 澄清轮仍在进行中（已收到 `clarify` 事件但尚未收到 `turn_end`），用户尝试点选选项卡片
 - **THEN** 前端将选项卡片保持为禁用/loading 态不发起请求；点选交互在 `turn_end` 到达后才启用，保证点选轮路由读取历史时澄清行已落库
+
+### Requirement: 对话请求消息体约束
+
+`POST /chat` 的请求体 SHALL 对用户输入设界：`message` MUST 为字符串，去除首尾空白后长度 SHALL 在 1~8000 字符之间；空消息（含纯空白）或超长消息 SHALL 返回 400 `VALIDATION`，MUST NOT 触发路由、LLM 调用或消息落库。可选字段 `clarify_selection.value` 长度 MUST NOT 超过 200 字符，越界按 400 `VALIDATION` 拒绝。
+
+#### Scenario: 空消息被拒绝
+
+- **WHEN** 客户端 POST `/chat` 且 `message` 为空串或仅含空白字符
+- **THEN** 系统返回 400 `VALIDATION`，不产生任何 SSE 事件、不写入消息、不调用 LLM
+
+#### Scenario: 超长消息被拒绝
+
+- **WHEN** `message` 去除空白后超过 8000 字符
+- **THEN** 系统返回 400 `VALIDATION`，请求不进入路由与 Agent 执行

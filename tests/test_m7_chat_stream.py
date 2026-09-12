@@ -99,8 +99,9 @@ def test_stream_replays_buffered_events():
             with c.stream("POST", "/chat", json={"message": _TRIGGER_MSG},
                           headers={"x-service": "s", "x-env": "dev", "x-user": "u"}) as r:
                 _ = "\n".join(r.iter_lines())
-            # GET /stream 续传重放
-            with c.stream("GET", "/stream?sessionId=s:dev:u&lastEventId=0") as s:
+            # GET /stream 续传重放（携同身份头，通过归属校验）
+            with c.stream("GET", "/stream?sessionId=s:dev:u&lastEventId=0",
+                          headers={"x-service": "s", "x-env": "dev", "x-user": "u"}) as s:
                 assert s.status_code == 200
                 lines = []
                 for line in s.iter_lines():
@@ -116,6 +117,10 @@ def test_stream_replays_buffered_events():
 
 def test_chat_heartbeat_when_idle():
     app, store, broker = build_test_app()  # heartbeat=0.5s（conftest env）
+    # 统一归属校验：无 POST 历史的 sid 需预置 owner 行（无头 -> default/dev/anonymous）
+    app.state.chat_sessions.sessions["HB1"] = {
+        "session_id": "HB1", "uid": "anonymous", "service": "default", "env": "dev", "title": "t"
+    }
     with run_server(app) as base:
         with httpx.Client(base_url=base, timeout=5) as c:
             with c.stream("GET", "/stream?sessionId=HB1&lastEventId=0") as s:
@@ -131,6 +136,10 @@ def test_chat_heartbeat_when_idle():
 def test_stream_receives_notification_live():
     """GET /stream 实时接收 notification 通知（续传 + 不阻塞 POST 路径）。"""
     app, store, broker = build_test_app()
+    # 通知通道无 POST 历史：预置 owner 行（订阅请求无头 -> default/dev/anonymous）
+    app.state.chat_sessions.sessions["S1"] = {
+        "session_id": "S1", "uid": "anonymous", "service": "default", "env": "dev", "title": "t"
+    }
     with run_server(app) as base:
         with httpx.Client(base_url=base, timeout=5) as c:
             with c.stream("GET", "/stream?sessionId=S1&lastEventId=0") as s:

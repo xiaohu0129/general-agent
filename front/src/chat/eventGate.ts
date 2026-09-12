@@ -5,6 +5,10 @@
 
 export type EventChannel = "post" | "stream";
 
+/** seen 去重集合的有界 LRU 容量：按 Map 插入序淘汰最旧键（命中不 refresh）。
+ *  2000 键约覆盖一个长会话的事件量，超长会话中最旧事件可被再次放行（设计接受）。 */
+export const SEEN_LRU_CAPACITY = 2000;
+
 export interface SequencedEvent {
   data: { turnId?: string | null; eventSeq?: number | null };
 }
@@ -26,7 +30,9 @@ export interface EventGate {
 export function createEventGate(): EventGate {
   // 去重游标：键为 `${turnId 缺省则空串}#${eventSeq}`。
   // notification 无 turnId 也占 seq，空串前缀保证其键不与 turn 事件塌缩。
-  const seen = new Set<string>();
+  // 有界 LRU：Map 按插入序迭代，超容量删除最旧键；重复命中不 refresh 位置
+  // （纯插入序语义：近期与最旧的判定只取决于首次见到的先后）。
+  const seen = new Map<string, true>();
   let maxSeq: number | null = null;
 
   return {
@@ -48,11 +54,18 @@ export function createEventGate(): EventGate {
       if (seen.has(key)) {
         return { apply: false, gap: false };
       }
-      seen.add(key);
+      seen.set(key, true);
+      if (seen.size > SEEN_LRU_CAPACITY) {
+        const oldest = seen.keys().next().value;
+        if (oldest !== undefined) seen.delete(oldest);
+      }
       const prevMax = maxSeq;
       // 乱序迟到（seq < 水位）只更新记忆、不报 gap；首连基线（prevMax===null）
-      // 即使 seq 很大也不报缺口。
-      const gap = prevMax !== null && eventSeq > prevMax + 1;
+      // 即使 seq 很大也不报缺口。缺口只由 stream 通道产生：post 是 POST /chat 的
+      // 即时流（非全序订阅通道），其 seq 跳变不代表丢事件，但仍推进水位与去重，
+      // 使随后连续到达的 stream 事件不被误报。
+      const gap =
+        channel === "stream" && prevMax !== null && eventSeq > prevMax + 1;
       maxSeq = prevMax === null ? eventSeq : Math.max(prevMax, eventSeq);
       return { apply: true, gap };
     },

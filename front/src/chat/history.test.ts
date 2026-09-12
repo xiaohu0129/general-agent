@@ -125,3 +125,54 @@ describe("historyToMessages：clarify/source 历史还原", () => {
     expect(a.artifactSize).toBe(123);
   });
 });
+
+describe("historyToMessages：工具卡真实 status（U11a 历史 DTO）", () => {
+  function toolRows(status: HistoryMessage["status"]) {
+    return [
+      row({ turnId: "t1", role: "user", content: "跑一下" }),
+      row({
+        turnId: "t1",
+        role: "assistant",
+        toolCalls: [{ id: "tc1", name: "shell", arguments: "{}" }],
+      }),
+      row({ turnId: "t1", role: "tool", toolCallId: "tc1", content: "err", status }),
+    ];
+  }
+
+  it("tool 行 status=error：对应工具卡 status=error（刷新后失败可见）", () => {
+    const [, a] = historyToMessages(toolRows("error"), "sess-1");
+
+    expect(a.toolCalls).toHaveLength(1);
+    expect(a.toolCalls[0].status).toBe("error");
+  });
+
+  it("tool 行 status=success：工具卡 status=success", () => {
+    const [, a] = historyToMessages(toolRows("success"), "sess-1");
+
+    expect(a.toolCalls[0].status).toBe("success");
+  });
+
+  it("tool 行 status 缺省或 null：按 success 兜底（兼容旧数据）", () => {
+    const [, a1] = historyToMessages(toolRows(undefined), "sess-1");
+    const [, a2] = historyToMessages(toolRows(null), "sess-1");
+
+    expect(a1.toolCalls[0].status).toBe("success");
+    expect(a2.toolCalls[0].status).toBe("success");
+  });
+
+  it("非 tool 行携带的 status 不影响工具卡：无匹配 tool 结果时仍 success 兜底", () => {
+    const rows = [
+      row({ turnId: "t1", role: "user", content: "q", status: "error" }),
+      row({
+        turnId: "t1",
+        role: "assistant",
+        content: "a",
+        status: null,
+        toolCalls: [{ id: "tc-x", name: "shell", arguments: "{}" }],
+      }),
+    ];
+
+    const [, a] = historyToMessages(rows, "sess-1");
+    expect(a.toolCalls[0].status).toBe("success");
+  });
+});

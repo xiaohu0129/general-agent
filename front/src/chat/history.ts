@@ -8,6 +8,7 @@ interface ToolResultMeta {
   offloaded: boolean;
   size?: number | null;
   kind?: string | null;
+  status?: "success" | "error" | null;
 }
 
 function safeParse(s: string): unknown {
@@ -28,6 +29,7 @@ export function historyToMessages(rows: HistoryMessage[], sessionId: string): Ch
         offloaded: !!r.contentRef,
         size: r.contentSize,
         kind: r.contentKind,
+        status: r.status,
       });
     }
   }
@@ -55,7 +57,8 @@ export function historyToMessages(rows: HistoryMessage[], sessionId: string): Ch
           toolCallId: id,
           toolName: tc.name || "tool",
           args,
-          status: "success",
+          // U11a：以 tool 结果行的真实状态为准；缺字段/无结果行时按 success 兜底
+          status: meta?.status === "error" ? "error" : "success",
           result: meta ? safeParse(meta.content) : undefined,
           offloaded: meta?.offloaded || false,
           artifactUrl:

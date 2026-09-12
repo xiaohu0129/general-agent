@@ -4,7 +4,7 @@
 - 密码：PBKDF2-HMAC-SHA256，随机 salt，标准库实现，不落明文；
 - 登录态：服务端保存（内存 TTL dict；Redis 版预留），浏览器仅持不透明 token（HttpOnly cookie）；
 - 即时吊销：登出/踢下线删服务端记录即生效，无 JWT 式滞后窗口；
-- token 仅经 cookie 传输、secrets 生成、常量时间比较，XSS 不可读、不可猜测。
+- token 仅经 cookie 传输、secrets 生成，XSS 不可读、不可猜测（dict 按键命中后无需再做比较）。
 """
 from __future__ import annotations
 
@@ -58,6 +58,11 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+# 登录时用户不存在也跑一次等价 PBKDF2，拉平"用户存在/不存在"响应耗时（防用户枚举时序差）。
+# import 期一次性生成，200k 轮成本仅承担一次；随机明文保证不对应任何真实密码。
+_DUMMY_HASH = hash_password(secrets.token_hex(32))
+
+
 # ---------------- 登录会话 ----------------
 @dataclass
 class LoginSession:
@@ -78,8 +83,9 @@ class LoginSessionStore:
     def __init__(self, ttl_seconds: float = 7 * 24 * 3600) -> None:
         self.ttl = ttl_seconds
         self._sessions: dict[str, LoginSession] = {}
-        # 登录失败限流：key -> (失败次数, 首次失败时间)
+        # 登录失败限流：ip|username 维度 + username 跨 IP 维度，同窗口同阈值独立计数
         self._login_fails: dict[str, tuple[int, float]] = {}
+        self._login_user_fails: dict[str, tuple[int, float]] = {}
         self._max_fails = 5
         self._lock_window = 600.0  # 10 分钟窗口
 
@@ -87,10 +93,15 @@ class LoginSessionStore:
         expired = [t for t, s in self._sessions.items() if s.expires_at <= now]
         for t in expired:
             self._sessions.pop(t, None)
-        # 顺带清理超出锁定窗口的登录失败计数，防批量撞库时键无界增长
+        # 顺带清理超出锁定窗口的登录失败计数，防批量撞库时键无界增长（两维都清）
         stale = [k for k, (_, first) in self._login_fails.items() if now - first > self._lock_window]
         for k in stale:
             self._login_fails.pop(k, None)
+        stale_users = [
+            u for u, (_, first) in self._login_user_fails.items() if now - first > self._lock_window
+        ]
+        for u in stale_users:
+            self._login_user_fails.pop(u, None)
 
     def create(self, uid: str, username: str, *, now: float | None = None) -> LoginSession:
         now = now if now is not None else time.time()
@@ -111,9 +122,6 @@ class LoginSessionStore:
             return None
         if sess.expires_at <= now:
             self._sessions.pop(token, None)
-            return None
-        # 常量时间比较 token，防时序侧信道
-        if not hmac.compare_digest(sess.token, token):
             return None
         return sess
 
@@ -140,22 +148,32 @@ class LoginSessionStore:
     def login_locked(self, ip: str, username: str, *, now: float | None = None) -> bool:
         now = now if now is not None else time.time()
         self._purge_expired(now)
-        rec = self._login_fails.get(self._fail_key(ip, username))
+        # 任一维度（ip|username 或 username 跨 IP）命中即锁定
+        return self._dim_locked(self._login_fails, self._fail_key(ip, username), now) or self._dim_locked(
+            self._login_user_fails, username, now
+        )
+
+    def _dim_locked(self, fails: dict, key: str, now: float) -> bool:
+        rec = fails.get(key)
         if rec is None:
             return False
         count, first = rec
         if now - first > self._lock_window:
-            self._login_fails.pop(self._fail_key(ip, username), None)
+            fails.pop(key, None)
             return False
         return count >= self._max_fails
 
     def record_login_fail(self, ip: str, username: str, *, now: float | None = None) -> None:
         now = now if now is not None else time.time()
-        key = self._fail_key(ip, username)
-        count, first = self._login_fails.get(key, (0, now))
+        self._bump_fail(self._login_fails, self._fail_key(ip, username), now)
+        self._bump_fail(self._login_user_fails, username, now)
+
+    def _bump_fail(self, fails: dict, key: str, now: float) -> None:
+        count, first = fails.get(key, (0, now))
         if now - first > self._lock_window:
             count, first = 0, now
-        self._login_fails[key] = (count + 1, first)
+        fails[key] = (count + 1, first)
 
     def clear_login_fails(self, ip: str, username: str) -> None:
         self._login_fails.pop(self._fail_key(ip, username), None)
+        self._login_user_fails.pop(username, None)

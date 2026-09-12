@@ -65,14 +65,24 @@ def _message_to_row(m: BaseMessage) -> dict:
     return row
 
 
+# CJK 统一表意文字及中文标点所在区段：每字约 1 token（主流分词器 0.6~1 token/字）
+_CJK_RANGES = ((0x3000, 0x303F), (0x4E00, 0x9FFF), (0xFF00, 0xFFEF))
+
+
+def _is_cjk(ch: str) -> bool:
+    o = ord(ch)
+    return any(lo <= o <= hi for lo, hi in _CJK_RANGES)
+
+
 def _est_tokens(m: BaseMessage) -> int:
-    """估算 token：len(content)//4（约 4 char/token，CJK 偏高估），含 tool_calls args。"""
+    """估算 token：CJK（含中文标点）每字约 1 token，其余每 4 字符约 1 token，含 tool_calls args。"""
     c = m.content
     s = c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
     if isinstance(m, AIMessage) and m.tool_calls:
         for tc in m.tool_calls:
             s += json.dumps(tc.get("args", {}), ensure_ascii=False)
-    return len(s) // 4 + 1
+    cjk = sum(1 for ch in s if _is_cjk(ch))
+    return cjk + (len(s) - cjk) // 4 + 1
 
 
 def _maybe_json(value):

@@ -53,11 +53,3 @@ class UserStore:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(sql, (username,))
                 return await cur.fetchone()
-
-    async def get_by_uid(self, uid: str) -> dict | None:
-        pool = await self._pool_obj()
-        sql = f"SELECT uid, username, password_hash FROM {TABLE} WHERE uid=%s"
-        async with pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(sql, (uid,))
-                return await cur.fetchone()

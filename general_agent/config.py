@@ -90,9 +90,10 @@ class AgentSettings(BaseModel):
 
 class BrokerSettings(BaseModel):
     """M7 事件中枢 Broker + 心跳配置"""
-    ring_size: int = 256  # 每会话 ring buffer 容量（续传窗口）
+    ring_size: int = 2048  # 每会话 ring buffer 容量（续传窗口；token 级 turn_delta 下 256 不足一个长回复）
     sub_queue_size: int = 1024  # 订阅者队列容量（背压阈值）
     heartbeat_interval: float = 15.0  # 心跳间隔，须 < 链路最短 idle 超时（网关 60s）
+    session_ttl: float = 86400.0  # 会话状态空闲回收时长（秒）：无订阅者且超时无新事件则清除 seq/ring
 
 
 class RateLimitSettings(BaseModel):
@@ -100,6 +101,13 @@ class RateLimitSettings(BaseModel):
     enabled: bool = True
     rps: float = 5.0  # 每秒补充令牌数
     burst: int = 10  # 桶容量（允许突发）
+
+
+class RegisterRateSettings(BaseModel):
+    """注册接口按 IP 限流配置（独立于对话令牌桶）"""
+    enabled: bool = True
+    rps: float = 10 / 60  # 每分钟 10 次
+    burst: int = 5  # 桶容量（允许突发）
 
 
 class SessionAuthSettings(BaseModel):
@@ -124,6 +132,7 @@ class SecuritySettings(BaseModel):
     session: SessionAuthSettings = SessionAuthSettings()
     web: WebSettings = WebSettings()
     rate_limit: RateLimitSettings = RateLimitSettings()
+    register_rate: RegisterRateSettings = RegisterRateSettings()
 
 
 class RedisSettings(BaseModel):
@@ -148,6 +157,7 @@ class MysqlSettings(BaseModel):
     password: str = ""
     database: str = "general_agent"
     pool_size: int = 5
+    pool_recycle: int = 1800  # 秒；周期回收旧连接，规避云 MySQL/防火墙静默断开空闲 TCP（U7）
 
 
 class LogSettings(BaseModel):

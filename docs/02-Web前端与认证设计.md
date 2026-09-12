@@ -80,14 +80,15 @@ security:
 - `verify_password(password, stored) -> bool`：`hmac.compare_digest` 常量时间比较。
 - `LoginSession` dataclass：`token / uid / username / created_at / expires_at`。
 - `LoginSessionStore`：
-  - 内存实现：`dict[token, LoginSession]` + 懒过期清理；`create(uid, username, ttl) -> token`（token = `secrets.token_urlsafe(32)`）、`get(token)`（过期返回 None 并删除）、`touch(session)`（滑动续期，剩余寿命 < ttl/2 时重置 expires）、`revoke(token)`、`revoke_all(uid)`（踢下线，预留）。
+  - 内存实现：`dict[token, LoginSession]` + 懒过期清理；`create(uid, username, ttl) -> token`（token = `secrets.token_urlsafe(32)`）、`get(token)`（过期返回 None 并删除；dict 按键命中即对应会话，**不再做 token 自比的常量时间比较**——platform-hardening-fixes 删除了该处恒真比较）、`touch(session)`（滑动续期，剩余寿命 < ttl/2 时重置 expires）、`revoke(token)`、`revoke_all(uid)`（踢下线，预留）。
+  - 登录失败锁定为**双维度计数**（窗口/阈值相同：5 次/10 分钟）：`ip|username` 与 `username`（跨 IP）各自独立计数，`login_locked` 任一维度命中即锁（429 `LOGIN_LOCKED`），成功登录清两维；新增 username 维度用于防"多 IP 各试 4 次"分布式撞库，代价是接受按用户名锁号的短窗口 DoS 面。
   - Redis 实现预留（`RedisLoginSessionStore`，key `general:agent:loginsession:<token>`，TTL），配置 redis 时启用；本期实现内存版，接口对齐。
 - Cookie 辅助：`set_session_cookie(resp, token, ttl, secure)` / `clear_session_cookie(resp)`；属性 `HttpOnly; SameSite=Lax; Path=/; Max-Age=<ttl>`，`Secure` 按配置。
 
 #### `general_agent/user_store.py` — UserStore（MySQL）
 
 - `create_user(username, password) -> uid`：用户名冲突抛 `AuthError(409, "USER_EXISTS")`；用户名规则 `^[a-zA-Z0-9_\u4e00-\u9fa5]{2,32}$`，密码长度 8–64。
-- `get_by_username(username)` / `get_by_uid(uid)`：返回行或 None。
+- `get_by_username(username)`：返回行或 None（platform-hardening-fixes 已删除从未调用的 `get_by_uid`）。
 - 可注入 pool（测试用内存 Fake）。
 
 #### `general_agent/chat_session_store.py` — ChatSessionStore（MySQL）
@@ -103,12 +104,12 @@ security:
 
 | 方法/路径 | 入参 | 行为 | 响应 |
 |---|---|---|---|
-| `POST /auth/register` | `{username, password}` | 校验规则 → 建用户 → 自动登录（建 session + Set-Cookie） | `{uid, username}` + Set-Cookie |
-| `POST /auth/login` | `{username, password}` | 查用户 → verify_password（用户不存在与密码错误统一报 401 `INVALID_CREDENTIALS`，防用户枚举） | `{uid, username}` + Set-Cookie |
+| `POST /auth/register` | `{username, password}` | 按客户端 **IP 限流**后校验规则 → 建用户 → 自动登录（建 session + Set-Cookie）；限流配置 `security.register_rate.{enabled,rps,burst}`，默认约 10 次/分钟（rps=0.167）、突发 5，超限 429 `RATE_LIMIT` 且不建用户 | `{uid, username}` + Set-Cookie |
+| `POST /auth/login` | `{username, password}` | 查用户 → verify_password（用户不存在时同样执行一次 dummy PBKDF2 校验，**拉平两条失败路径耗时**防时序枚举；与密码错误统一报 401 `INVALID_CREDENTIALS`，防用户枚举） | `{uid, username}` + Set-Cookie |
 | `POST /auth/logout` | — | revoke 服务端 session + 清 cookie | `{ok: true}` |
 | `GET /auth/me` | — | 需登录 | `{uid, username}` |
 
-错误均走现有 `GovernanceError`（JSON `{code, message}`）：401 `UNAUTHORIZED` / 409 `USER_EXISTS` / 400 `VALIDATION`。
+错误均走现有 `GovernanceError`（JSON `{code, message}`）：401 `UNAUTHORIZED`/`INVALID_CREDENTIALS`、409 `USER_EXISTS`、400 `VALIDATION`、429 `RATE_LIMIT`/`LOGIN_LOCKED`。
 
 #### `general_agent/api/sessions.py`（均需登录）
 
@@ -116,7 +117,7 @@ security:
 |---|---|
 | `GET /sessions` | 当前用户会话列表 `[{sessionId, title, updatedAt}]` |
 | `POST /sessions` | 显式新建会话 `{title?}` → `{sessionId, title}`（也可不建，/chat 自动建） |
-| `GET /sessions/{sessionId}/messages` | 历史消息（归属校验）：`[{role, content, toolCalls, toolCallId, turnId, createdAt, options?, selected?}]`，按 id ASC；澄清消息带 `options:[{label,value}]` 与已选 `selected`（带前缀 value 原样；存量无 meta 行两字段为 null 不报错） |
+| `GET /sessions/{sessionId}/messages` | 历史消息（归属校验）：`[{role, content, toolCalls, toolCallId, status, turnId, createdAt, options?, selected?}]`，按 id ASC；**含 `role:"tool"` 工具结果行**（platform-hardening-fixes 起输出，此前查出但丢弃），其 `status` 由后端派生——content strip 后可解析为 JSON 对象且含非空 `errorCode` → `"error"`，否则 `"success"`，前端据此真实回放工具卡成败，不再硬编码 success；澄清消息带 `options:[{label,value}]` 与已选 `selected`（带前缀 value 原样；存量无 meta 行两字段为 null 不报错） |
 | `PATCH /sessions/{sessionId}` | `{title}` 重命名 |
 | `DELETE /sessions/{sessionId}` | 删除会话及其消息 |
 
@@ -133,7 +134,7 @@ security:
 - `governance_dep` 按 mode 分流：`session` → cookie 登录态；`disabled/api_key/jwt` → 现有 x-* 头逻辑（API 调用方不受影响）。
 - token 校验要点（**重点**）：
   - token 仅经 cookie 传输（HttpOnly，JS 不可读，XSS 无法窃取）；
-  - 服务端查找后 `hmac.compare_digest` 比对；
+  - 服务端以 token 为键查 dict（命中即该会话，不做比较；早期"查找后常量时间比较"写法是恒真自比，已删除）；
   - 过期 session 立即清理并 401；
   - 登出/改密（预留）服务端 revoke 即时生效；
   - 限流仍按 `Identity.rate_key`（uid:env）生效。
@@ -170,7 +171,9 @@ security:
 
 - 未登录访问受保护接口 → 401（不重定向，前端路由自行跳登录页）。
 - 越权访问他人 sessionId → 404（不暴露存在性）。
-- 登录限流：同 IP + 同用户名失败计数（内存，5 次/10 分钟锁定，常量时间比较继续保留）——复用 TokenBucket 思路，失败计数器放 `LoginSessionStore` 同模块。
+- 登录限流：失败计数（内存，5 次/10 分钟锁定）按 **`ip|username` 与 `username` 双维度**独立统计，任一命中即 429 `LOGIN_LOCKED`（username 维度防多 IP 分布式撞库，接受由此带来的短窗口锁号 DoS 面）——计数器放 `LoginSessionStore` 同模块，过期键随懒清理回收。
+- 注册限流：`POST /auth/register` 按客户端 IP 走独立令牌桶（`security.register_rate`，默认约 10 次/分钟、突发 5），与对话限流分开；超限 429 `RATE_LIMIT` 且不建用户。
+- 防用户枚举时序：登录用户不存在时也执行一次 200k 轮 dummy PBKDF2 校验（`auth._DUMMY_HASH`，结果忽略），使"用户不存在/密码错误"两路径响应耗时不可分辨；响应体始终统一 401。
 - 用户名/密码长度与字符校验在注册与登录两侧一致（登录侧只做长度下限快速拒绝，不提示具体规则差异）。
 - cookie 不设 Secure 时本地 HTTP 可用；配置 `cookie_secure: true` 后仅 HTTPS 传输。
 
@@ -202,7 +205,7 @@ front/
       model.ts                  # 对话领域模型：消息/工具调用/澄清卡片/会话状态的前端建模
       applyEvent.ts             # 事件应用纯函数：事件状态推进、provenance 对账、旧卡片作废
       eventGate.ts              # 双通道幂等门：(turnId,eventSeq) 去重 + 会话级高水位/缺口检测
-      history.ts                # 历史 DTO → ChatMessage 映射（restored；options/selected 还原）
+      history.ts                # 历史 DTO → ChatMessage 映射（restored；options/selected 与工具 error/success 状态还原）
     state/
       auth-context.tsx          # 登录态（启动 GET /auth/me 引导）
     pages/
@@ -229,7 +232,7 @@ front/
   - `POST /chat` 用 `fetch`（EventSource 不支持 POST）+ `ReadableStream` 手动解析 SSE 帧（`event:`/`data:`/`id:`），帧分隔兼容 CRLF/LF/CR（见 §3.7），`credentials:'include'`；
   - 事件处理：`turn_start`（取 sessionId → 必要时新建侧边栏条目/更新 URL、绑定活动轮气泡）→ `turn_delta`（追加打字）→ `tool_start/tool_end`（工具卡片）→ `clarify`（澄清选项卡片，见 §3.5）→ `turn_end`（收尾，finishReason 提示、满足条件时启用卡片）→ `error`（错误条，卡片永不启用）；`notification` 不渲染，仅推进 seq 高水位；
   - **停止生成**：`AbortController.abort()`（后端 producer 仍跑完落库，与现有设计一致）；接入 `/stream` 后同轮后续事件经持久通道继续补齐（见 §3.6）；
-  - 刷新/切换会话后：`GET /sessions/{id}/messages` 回放历史（已完成的轮次内容不丢），映射为 `source:"restored"` 消息并还原澄清 options/selected（见 §3.5、§3.6 对账规则）；
+  - 刷新/切换会话后：`GET /sessions/{id}/messages` 回放历史（已完成的轮次内容不丢），映射为 `source:"restored"` 消息并还原澄清 options/selected（见 §3.5、§3.6 对账规则）；工具卡成败以历史 `role:"tool"` 行的派生 `status`（error/success）为准，失败工具刷新后仍显示失败（早期版本硬编码 success 的问题已修）；"stopped" 只是前端瞬时态、不落库，历史回放不表达；
   - 后端持久通道 `GET /stream` **已接入**：有当前会话时常开原生 EventSource（cookie/自动重连/`Last-Event-ID` 均浏览器原生承担），与 POST 即时流双通道按 `(turnId,eventSeq)` 幂等合并，断线或停止生成后同轮事件不丢，详见 §3.6。
 - **会话管理**：侧边栏列表（`GET /sessions`）、新建（本地空态 + 首条消息时后端自动建）、重命名、删除（二次确认）、切换（拉历史消息）。
 - **401 处理**：任意接口 401 → 清登录态 → 跳登录页（登录页提交后回到原路径）。
@@ -259,9 +262,9 @@ front/
 - **连接生命周期**：仅在存在当前会话时挂载 `SessionStream`，按 `new EventSource('/stream?sessionId=...')` 建连；随 sessionId 变化 cleanup `close()` 后重建。新建会话（current=null）不建连，等 `turn_start` 带回 sessionId、setCurrent 后补挂载。cookie 携带、断线重连、`Last-Event-ID` 头全部由浏览器原生承担，前端不做应用层退避；React 18 StrictMode dev 双挂载靠 effect cleanup 收敛，不残留双连接。
 - **按名监听，不用 onmessage**：后端每类事件都带 SSE `event:` 行，浏览器只把无 event 字段的默认事件投递给 onmessage；前端对七个事件名显式 `addEventListener`（turn_start/turn_delta/turn_end/tool_start/tool_end/clarify/notification），统一解析 `MessageEvent.data` 后汇入事件入口。
 - **业务 error 与连接 error 同名分流**：业务事件恰好名为 `error`，在浏览器里同样进入 onerror。处理器规则：onerror 收到 MessageEvent 且 data 为可解析 JSON → 业务 error 事件（恰好投递一次，进事件应用层；不再对 "error" 按名 addEventListener，避免双发）；无 data 的普通 Event → 连接错误：`readyState=CLOSED`（服务端返回非可接受状态、浏览器放弃重连）→ `close()` + 熔断降级为**仅 POST 即时流**（仅 console.warn，不阻断发送框；浏览器不暴露状态码，401 由下一次 REST 请求的既有流程收敛）；`readyState=CONNECTING`（网络抖动）→ 浏览器自动重连，仅 console.warn。
-- **双通道幂等合并**：POST 即时流（post）与 `/stream`（stream）汇入同一个事件入口，先过**会话级** eventGate（gate 按 sessionId 存于 Map，切会话不共享）：以 `Set<"${turnId ?? ""}#${eventSeq}">` 记录已应用事件，重复事件（双通道重复、ring 重放重复）跳过——文本不重复拼接、卡片状态不重复翻转、toolCalls 不重复插入；notification 无 turnId 也占 seq（空串前缀保证键不塌缩）。无 eventSeq 的防御分支：post 通道放行但不记忆（无法构造稳定键），stream 通道一律忽略，两路均不推进高水位。
-- **会话级高水位与缺口检测**：gate 维护 `maxSeenSeq`，所有带有限 seq 的事件共同推进（含前端不渲染的 notification——它同样经 broker.distribute 占 seq；heartbeat 是无 id 的 SSE 注释行，不计）。新事件 `seq > maxSeenSeq+1` 且此前有过事件 → 判 ring 缺口；乱序迟到（seq ≤ 水位）只记忆不报；**首次连接只建基线不报缺口**（首连 ring 全量重放与历史的重复由 provenance 对账解决）。
-- **缺口静默重拉合并**：活动轮（streaming）中检测到缺口仅挂账 `pendingGapRef`，在该轮 turn_end/error 收尾后执行；空闲缺口立即执行。执行体独立于 openSession（不 abort 即时流、不整体替换 messages、不 setCurrent、不清输入框）：重拉该会话历史映射为 restored，拼接"restored + turnId 尚未落库的 live 气泡"（已落库的旧 live 轮按 turnId 被 restored 替换、转正，selected 接受历史权威）；在途守卫保证连续缺口只重拉一次；顶部一次性内联提示"事件已过期，已刷新"。`/stream` 熔断/不可用时 POST 即时流与澄清卡片照常工作，缺口能力随之缺失、靠刷新兜底。
+- **双通道幂等合并**：POST 即时流（post）与 `/stream`（stream）汇入同一个事件入口，先过**会话级** eventGate（gate 按 sessionId 存于 Map，切会话不共享）：以有界 **LRU**（Map 插入序淘汰，容量 **2000**，命中不 refresh）记录已应用事件键 `"${turnId ?? ""}#${eventSeq}"`，重复事件（双通道重复、ring 重放重复）跳过——文本不重复拼接、卡片状态不重复翻转、toolCalls 不重复插入；notification 无 turnId 也占 seq（空串前缀保证键不塌缩）。无 eventSeq 的防御分支：post 通道放行但不记忆（无法构造稳定键），stream 通道一律忽略，两路均不推进高水位。
+- **会话级高水位与缺口检测**：gate 维护 `maxSeenSeq`，所有带有限 seq 的事件共同推进（含前端不渲染的 notification——它同样经 broker.distribute 占 seq；heartbeat 是无 id 的 SSE 注释行，不计）。**缺口（`seq > maxSeenSeq+1`）只由 `channel==="stream"` 的事件产生**——POST 即时流服务端已按 turnId 过滤，其 seq 跳号不携带信息，故 post 通道只推进高水位与去重、永不报缺口；高水位仍由两通道共同推进，保证 stream 真正缺口可判。乱序迟到（seq ≤ 水位）只记忆不报；**首次连接只建基线不报缺口**（首连 ring 全量重放与历史的重复由 provenance 对账解决）。
+- **缺口静默重拉合并**：活动轮（streaming）中检测到缺口仅挂账 `pendingGapRef`，在该轮 turn_end/error 收尾后执行；空闲缺口立即执行。执行体独立于 openSession（不 abort 即时流、不整体替换 messages、不 setCurrent、不清输入框）：重拉该会话历史映射为 restored，拼接"restored + turnId 尚未落库的 live 气泡"（已落库的旧 live 轮按 turnId 被 restored 替换、转正，selected 接受历史权威）；在途守卫保证连续缺口只重拉一次；顶部一次性内联提示"事件已过期，已刷新"，**合并成功后约 3 秒（`GAP_NOTICE_TTL_MS=3000`）自动消失**（切会话/新一轮发送的既有清除逻辑保留，timer 在卸载时清理）。`/stream` 熔断/不可用时 POST 即时流与澄清卡片照常工作，缺口能力随之缺失、靠刷新兜底。
 - **provenance 对账（applyEvent 纯函数）**：双通道事件去重后汇入唯一纯函数 `applyEvent(messages, ctx, ev)`。除 turn_start 外，所有带 turnId 的事件仅在命中 **live 助手气泡**时才推进：命中 restored 消息 → 整事件忽略（历史是权威快照，不拼文本/不插卡/不翻转状态）；不命中任何消息（未知 turnId：首连 ring 重放的更早轮次、他标签页轮次）→ 忽略且 MUST NOT 新建气泡；无 turnId 的 notification → 不进消息模型（仅在外层推进高水位）。`turn_start` 经 ChatPage 持有的"当前活动轮气泡 id"绑定到无 turnId 的 live 乐观气泡（单活动轮不变式，沿用 send 的 `if (streaming) return` 守卫），绑定同时作废更早的未选 live 卡片；建会话/侧边栏插入/setStreaming 等 React 副作用留在 ChatPage 回调，不进纯函数。
 - **停止生成的交互**：停止仍只 abort POST 即时流，EventSource 不受影响；同轮后续 turn_delta/clarify/turn_end 经 `/stream` 继续到达，经 gate 幂等后自然补齐（stopped 是截断时刻的本地事实，不阻止补齐），turn_end 后按现状收尾。取舍：刷新时刻正在运行、assistant 行尚未落库的轮次，其重放事件是未知 turnId 被忽略，本页不自动恢复，落库后重新打开会话可见。
 

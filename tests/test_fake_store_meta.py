@@ -60,6 +60,26 @@ async def test_load_web_messages_exposes_options_and_selected_from_meta():
     assert clarify["selected"] is None  # 尚未点选
 
 
+async def test_load_web_messages_tool_status_derived_from_appended_content():
+    import json
+
+    store = FakeStore()
+    await store.append_message("svc", "dev", "u1", "s1", "t1", "user", "帮我查", meta=None)
+    await store.append_message("svc", "dev", "u1", "s1", "t1", "assistant", "好的", meta=None)
+    await store.append_message(
+        "svc", "dev", "u1", "s1", "t1", "tool",
+        json.dumps({"errorCode": "NOT_FOUND", "message": "task bad not found"}, ensure_ascii=False),
+        tool_call_id="call_1",
+    )
+    await store.append_message(
+        "svc", "dev", "u1", "s1", "t1", "tool",
+        json.dumps({"taskId": "J123", "status": "PENDING"}, ensure_ascii=False),
+        tool_call_id="call_2",
+    )
+    page = await store.load_web_messages("svc", "dev", "u1", "s1", limit=10)
+    assert [m["status"] for m in page["messages"]] == [None, None, "error", "success"]
+
+
 async def test_update_clarify_selected_merges_without_overwriting_options():
     store = FakeStore()
     await _clarify_row(store, "t1")

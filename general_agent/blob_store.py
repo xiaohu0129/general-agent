@@ -4,7 +4,7 @@
 （默认 ./artifacts/），消息行只保留 head 摘要 + content_ref 引用。
 
 - key 完全由服务端 id 构成（uid/session/turn/<uuid>.ext），不拼接任何用户输入，杜绝路径穿越；
-- BlobStore 为薄抽象，业务代码仅依赖它，未来可加 S3/OSS 实现 drop-in 替换（对齐 Broker/RedisBroker）；
+- BlobStore 为薄抽象，业务代码仅依赖它，未来可加 S3/OSS 实现 drop-in 替换（对齐 Broker 的可替换模式）；
 - 本地实现不跨实例共享，属单实例约束（与内存 Broker/登录态一致），多实例需换对象存储后端。
 """
 from __future__ import annotations

@@ -67,6 +67,7 @@ async def get_mysql() -> aiomysql.Pool:
                     db=cfg.database,
                     autocommit=True,
                     maxsize=cfg.pool_size,
+                    pool_recycle=cfg.pool_recycle,
                     charset="utf8mb4",
                 )
                 await init_schema(_pool)

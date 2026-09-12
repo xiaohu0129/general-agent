@@ -25,6 +25,7 @@ class EmbeddingClient:
         timeout: float = 30.0,
         transport: Any = None,
         batch_size: int = 64,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = (base_url or _STUB_BASE).rstrip("/")
         self.model = model
@@ -32,6 +33,8 @@ class EmbeddingClient:
         self.timeout = timeout
         self.transport = transport
         self.batch_size = batch_size
+        # 注入共享 client 时复用且不负责关闭（归属 app/lifespan）；None 时按 transport 每次新建
+        self.client = client
 
     def _endpoint(self) -> str:
         return f"{self.base_url}/v1/embeddings"
@@ -47,10 +50,17 @@ class EmbeddingClient:
             return []
         results: list[list[float]] = []
         try:
-            async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout) as client:
+            owns_client = self.client is None
+            client = self.client or httpx.AsyncClient(
+                transport=self.transport, timeout=self.timeout
+            )
+            try:
                 for start in range(0, len(texts), self.batch_size):
                     batch = texts[start : start + self.batch_size]
                     results.extend(await self._embed_batch(client, batch))
+            finally:
+                if owns_client:
+                    await client.aclose()
         except LLMError:
             raise
         except Exception as exc:
@@ -66,7 +76,9 @@ class EmbeddingClient:
     async def _embed_batch(self, client: httpx.AsyncClient, batch: list[str]) -> list[list[float]]:
         """单批请求并返回与 batch 同序的向量；HTTP/解析错误沿用既有分类抛出。"""
         body = {"model": self.model, "input": batch}
-        r = await client.post(self._endpoint(), json=body, headers=self._headers())
+        r = await client.post(
+            self._endpoint(), json=body, headers=self._headers(), timeout=self.timeout
+        )
         if r.is_error:
             raise self._http_error(r)
         data = r.json()

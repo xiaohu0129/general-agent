@@ -103,7 +103,11 @@ POST /chat:
 
 ### 1.4 多实例扩展路径（当前单实例，接口不变）
 
-| 维度 | 当前单实例 | 多实例扩展 |
+> **已变更（2026-09，platform-hardening-fixes）**：下表为早期规划里程碑；当时据此实现的 `RedisBroker`
+> 从未装配且有五个硬伤，已**删除**而非修补，多实例事件中枢改为 backlog 独立变更交付；
+> `SessionStore`（含 `next_event_seq` 预留）同为只写不读的半成品，已一并删除。详见 §十决策记录 R2 与 docs/03 文末。
+
+| 维度 | 当前单实例 | 多实例扩展（backlog，须重新交付，见上注） |
 |------|----------------|----------------|
 | eventSeq | Broker 内存 next_seq | Redis INCR（SessionStore.next_event_seq 已预留） |
 | ring buffer | Broker 内存 deque | Redis List + TTL 滑动窗口 |
@@ -144,7 +148,7 @@ SSE id 行由 sse-starlette dict `{"id":..,"event":..,"data":..}` 驱动。
 
 网关信任模式：鉴权通过后信任 `x-service/x-env/x-user` 头（**网关负责真实身份**），agent 不自建用户体系；生产前置网关 + mTLS，纵深防御。
 - 失败 -> 401 `{"code":"AUTH","message":...}`（SSE/HTTP 统一）。
-- 登录失败限流：`LoginSessionStore` 按 "IP+用户名" 计数，5 次/10 分钟锁定 -> 429 `LOGIN_LOCKED`（见 `auth.py`）。
+- 登录失败限流：`LoginSessionStore` 按 `ip|username` 与 `username`（跨 IP）双维度计数，同窗口同阈值（5 次/10 分钟），任一命中即锁定 -> 429 `LOGIN_LOCKED`（platform-hardening-fixes 增补 username 维度；登录用户不存在时执行 dummy PBKDF2 拉平时序；注册另有按 IP 限流，详见 [02](./02-Web前端与认证设计.md) §2.5）。
 
 ### 2.2 env 白名单与多租户隔离
 
@@ -204,7 +208,7 @@ FastAPI 依赖链 `governance_dep`（按 `auth_mode` 分流：`session` -> cooki
 | C. trim_then_summarize | 保留摘要 | 多一次 LLM 调用，成本/延迟 |
 
 **选 B（当前）**；C 在 `context_strategy=summarize` 时启用（预留，需额外 LLM 调用，暂不实现）。
-- token 估算：无 tokenizer 时用 `len(content)//4`（约 4 char/token，CJK 偏高估），config 可调。
+- token 估算：无 tokenizer 时粗估——**CJK（含中文标点）每字约 1 token，其余字符 `len//4`**（platform-hardening-fixes 修正：旧实现一律 `len//4` 对中文是低估 2~4 倍，非"偏高估"，见 §十决策记录 R1），config 可调。
 - 裁剪保 system 不动 + 最近优先，**保 tool_call/tool_message 配对**：裁剪后若首条是孤儿 ToolMessage（前导 AIMessage(tool_calls) 已被裁掉），则向后跳过，避免无对应 tool_call 的 ToolMessage 喂给 LLM 致工具协议错乱。
 - load_messages 带 DB `limit`（硬上限 500）+ runner 侧 max_context_tokens 裁剪，双层防护。
 
@@ -297,12 +301,12 @@ FastAPI 依赖链 `governance_dep`（按 `auth_mode` 分流：`session` -> cooki
 ### 6.2 M6
 - `security.py`：`governance_dep`（按 auth_mode 分流 session/x-* 头）/`service_auth_dep`/`TokenBucket`/审计 helper/`GovernanceError`；jwt 占位 fail-closed（B11）。
 - `auth.py`（新，Web）：PBKDF2 密码哈希/校验、`LoginSession`/`LoginSessionStore`（内存 TTL + 滑动续期 + 即时吊销 + 登录失败限流 5 次/10 分钟）。
-- `user_store.py`（新）：`UserStore`（MySQL `agent_user` 表，建用户/按名/按 uid 查询，冲突抛 `UserExistsError`）。
+- `user_store.py`（新）：`UserStore`（MySQL `agent_user` 表，建用户/按用户名查询，冲突抛 `UserExistsError`；platform-hardening-fixes 删除从未调用的 `get_by_uid`）。
 - `chat_session_store.py`（新）：`ChatSessionStore`（MySQL `agent_chat_session` 表，多会话 CRUD + uid 归属校验 + touch）。
 - `api/auth_routes.py`（新）：`POST /auth/register|login|logout`、`GET /auth/me`；防用户枚举（统一 401 INVALID_CREDENTIALS）+ 登录限流（429 LOGIN_LOCKED）。
 - `api/sessions.py`（新）：`GET/POST /sessions`、`GET /sessions/{id}/messages`、`PATCH/DELETE /sessions/{id}`，越权 404。
 - `logging_setup.py`：`redact_processor`。
-- `api/chat.py`/`api/stream.py`：接入 `governance_dep`；session 模式做会话归属校验。
+- `api/chat.py`/`api/stream.py`：接入 `governance_dep`；会话归属校验已在 platform-hardening-fixes 中扩展为**全鉴权模式统一执行**（owner 落 MySQL，首次写入者认领，/stream 跨身份 404，见 §十决策记录 R3）。
 - `config.py`/`config.yaml`：`security.*`（含 `session`/`web` 子块）。
 - `observability.py`：`agent.rate_limit.hits` metric。
 - 服务间鉴权：`POST /internal/notify` 经 `service_auth_dep`（X-Api-Key）；详见 `security.py`。Web 认证完整设计见 [02](./02-Web前端与认证设计.md)。
@@ -321,7 +325,7 @@ FastAPI 依赖链 `governance_dep`（按 `auth_mode` 分流：`session` -> cooki
 - `tests/test_context_trim.py`：保 tool 配对不孤儿。
 - `tests/test_auth_web.py`：Web 注册/登录/登出/me、未登录 401、cookie 对话、会话 CRUD/归属 404、登录限流。
 - `tests/test_turn_lock.py`：同会话串行、引用计数回收不互斥失效。
-- `tests/test_redis_broker.py`：RedisBroker 序列/环形缓冲/Pub-Sub（多实例）。
+- ~~`tests/test_redis_broker.py`：RedisBroker 序列/环形缓冲/Pub-Sub（多实例）。~~ 该模块与测试已在 platform-hardening-fixes 中删除（未装配 + 五硬伤，见 §十 R2）。
 - 基建：MockTransport/TestClient/uvicorn 真实服务器/FakeStore/FakeUserStore/FakeChatSessionStore。
 
 ---
@@ -332,7 +336,7 @@ FastAPI 依赖链 `governance_dep`（按 `auth_mode` 分流：`session` -> cooki
 |------|----------|------|
 | M1 骨架 | 配置加载 | env/yaml/默认三级合并 |
 | M2/M4 核心 | POST /chat 端到端 | turn_start..turn_end，含 id/eventSeq/心跳/续传，roles 持久化 user->assistant->tool->assistant |
-| M3 会话 | SessionStore 单元 | next_event_seq 预留多实例；当前 Broker 内存 seq |
+| M3 会话 | SessionStore 单元 | next_event_seq 预留多实例；当前 Broker 内存 seq（**历史记录：SessionStore/RedisBroker 已删除，见 §十 R2**） |
 | Skill 机制 | 工具链路端到端 | 内联 DemoSkill 驱动；成功流/错误流端到端，工具异常不杀轮次 |
 | M6 治理 | 集成测试 | 鉴权/env/限流/脱敏/审计全通过 |
 | M7 稳定 | 单元+真实服务器 | Broker 单元 + GET /stream replay/心跳/notification |
@@ -366,6 +370,57 @@ FastAPI 依赖链 `governance_dep`（按 `auth_mode` 分流：`session` -> cooki
 
 - **B8 编码损坏**：上一轮写文件经 PowerShell stdin（ASCII）致中文变 `?`，含 Skill `description`（发给 LLM，功能性损坏）。本轮显式 UTF-8 写入，清理全部源码 docstring/注释/工具描述与本文档及通知契约，并固化写文件规范（见 §零）。
 - **B9 producer 引用**：`chat` 同步 `inflight.add(producer)` 持有引用，消除 asyncio 任务 GC 理论窗口。
-- ✅ **多实例 Redis 升级**：已实现 `RedisBroker`（Redis INCR 序列、Redis List 环形缓冲、Redis Pub/Sub 跨实例通知），与 `Broker` 接口一致，9 项单测通过。
+- ✅ **多实例 Redis 升级**：已实现 `RedisBroker`（Redis INCR 序列、Redis List 环形缓冲、Redis Pub/Sub 跨实例通知），与 `Broker` 接口一致，9 项单测通过。（**历史里程碑，已变更：该模块从未装配且有五个硬伤，2026-09 platform-hardening-fixes 中已删除，多实例改 backlog 重新交付，见 §十 R2 与 docs/03 文末**）
 - **真实 LLM 端点切换**：代码已就绪（`llm.base_url`/`llm.api_key`/`llm.model` 配置），属于运维切换，无需新代码；本地联调可用 `stub_llm.py`（:9094）。
 - **服务间鉴权方案**：业务系统→agent 的异步通知经 `X-Api-Key` 鉴权（`service_auth_dep` + `security.api_keys`）；agent→LLM 端点经 `llm.api_key`（Bearer）。生产可在网关层正式化双向 TLS/mTLS。
+
+---
+
+## 十、平台硬化错题/决策记录（platform-hardening-fixes，2026-09）
+
+> 一次"319 后端测试 + 110 前端测试全绿前提下"的代码走查发现 21 个测试覆盖不到的缺陷；
+> 完整方案见 `openspec/changes/platform-hardening-fixes/{proposal,design}.md`。本节记录其中三条
+> 与本文历史表述直接冲突、需要在此留痕的错题/决策（历史里程碑原文保留，仅加变更指引）。
+
+### R1. 中文 token 估算方向写反：`len//4` 对 CJK 是低估而非高估
+
+- **现象**：§三（D8）旧表述为"`len(content)//4`（约 4 char/token，CJK 偏高估）"。实际主流分词器中文
+  约 0.6~1 token/字，`//4` 等于按 0.25 token/字计，对纯中文内容**系统性低估 2~4 倍**——超长中文会话
+  实际 token 早已超窗，预算裁剪却不触发，最终 OpenAI 返回 400。
+- **根因**：把"西文 4 字符/token"的经验系数误当通用系数，并把误差方向记反；测试只用短文本/西文夹具，
+  从未用长中文文本钉住估算量级。
+- **修复**：`runner._est_tokens` 改为逐字符分类估算——CJK 区段（`\u3000-\u303f` 中文标点、
+  `\u4e00-\u9fff` 统一表意文字、`\uff00-\uffef` 全角字符）每字计 1，其余字符沿用 `len//4`，
+  tool_call args 用同一函数计入；裁剪/孤儿清洗算法不动。宁可轻微高估（更早裁剪）也不超窗 400。
+- **教训**：粗估系数必须按字符类别分别论证并写清方向；"测试全绿"不代表量级正确，估算类逻辑要用
+  已知量级的纯中文/纯西文/中英混合夹具钉死。
+
+### R2. 未装配半成品减面：删除 RedisBroker 与 SessionStore，而非继续修补
+
+- **现象**：仓库中长期存在"`RedisBroker` 已实现、接口一致、9 项单测通过、接线即可用"（见 §1.4、
+  §6.4、§九）与"`SessionStore.next_event_seq` 已预留多实例"的表述，给人"多实例只差接线"的印象。
+  实际上 `RedisBroker` **从未被 app 装配**，且走查发现五个硬伤：① replay 是 async 签名，与
+  `stream.py` 的同步调用不兼容；② notification 自发自收双投；③ Pub/Sub listener 无断线重连；
+  ④ turn 事件不走跨实例通道（只有 notification 走 Pub/Sub）；⑤ Redis key 全部无 TTL，无界增长。
+- **决策**：**删除** `redis_broker.py` 及其单测、删除只写不读的 `session.py`（SessionStore，
+  owner 权威改归 MySQL 会话表后更无存在意义）；多实例事件中枢作为**独立 change 重新设计交付**，
+  docs/03 文末改写为"backlog + 五项前置条件"。理由：五个问题涉及投递语义与生命周期，不是小修能救；
+  保留半成品会持续制造"随时可接线"的错误预期，减面优于修补。
+- **教训**："写了且有单测"不等于"可交付"——未进入装配、与真实调用方签名未对齐的模块是负债而非资产；
+  文档中的"已预留/已实现"状态必须以装配事实为准，半成品删除时历史记录保留但加变更指引。
+
+### R3. 会话归属模型统一：全鉴权模式 owner 落 MySQL，首次写入者认领（BREAKING）
+
+- **背景**：会话归属原本只在 `auth_mode=session` 校验；api_key/disabled 模式仅靠共享凭证 + 自报
+  `x-*` 头，`agent_chat_session` 表在非 session 模式不写 owner 行，`/stream` 存在跨租户窃听路径
+  （同 API Key 下 A 的会话 B 可订阅）。
+- **决策**：所有鉴权模式下 `/chat`、`/stream`、`/sessions` 都校验 `sessionId` 与调用身份
+  `(service,env,user)` 的归属，归属以 MySQL `agent_chat_session` 为唯一权威（不依赖可选 Redis）：
+  - `POST /chat` 路由前先 `claim_if_absent`（`INSERT IGNORE` + 查归属，幂等）——无 owner 行的会话由
+    **首次写入者认领**（兼容升级前历史会话，先到先得；认领竞态下只有一个 owner 成功，另一身份收 404）；
+  - `GET /stream` 先 `get_owned_scoped`，无记录或归属不符一律 404 `SESSION_NOT_FOUND`；
+  - `/sessions` 管理接口仍仅 session 模式使用（api_key 调用方自管 sessionId）。
+- **BREAKING 面**：仅针对 api_key/disabled 模式下"多个身份混用同一 sessionId（A 写 B 订阅）"的异常
+  用法——升级后 B 收 404；合法单一身份会话零迁移（首次 POST 自动认领）。升级说明见 docs/03 §五。
+- **教训**：鉴权模式只决定"如何认证身份"，归属校验不应随模式开关；可选基础设施（Redis）不能承担
+  必须强一致的归属权威。

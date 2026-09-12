@@ -87,6 +87,48 @@ class ChatSessionStore:
                 await cur.execute(sql, (session_id, uid))
                 return await cur.fetchone()
 
+    async def get_owned_scoped(
+        self, session_id: str, service: str, env: str, uid: str
+    ) -> dict | None:
+        """四元组归属校验（api_key/disabled 模式）：任一维度不符或不存在返回 None。"""
+        pool = await self._pool_obj()
+        sql = (
+            f"SELECT session_id, uid, service, env, title, created_at, updated_at "
+            f"FROM {TABLE} WHERE session_id=%s AND uid=%s AND service=%s AND env=%s"
+        )
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(sql, (session_id, uid, service, env))
+                return await cur.fetchone()
+
+    async def claim_if_absent(
+        self, session_id: str, service: str, env: str, uid: str, title: str
+    ) -> dict | None:
+        """无主会话先到先得认领：INSERT IGNORE 靠主键原子性保证单 owner。
+
+        插入后按四元组回查：归属当前身份返回行；已属他人（INSERT 未生效）返回 None。
+        幂等：已属自己时重复调用返回原行（标题不覆盖）。
+        """
+        title = (title or "新会话")[:TITLE_MAX_LEN]
+        pool = await self._pool_obj()
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"INSERT IGNORE INTO {TABLE} (session_id, uid, service, env, title) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (session_id, uid, service, env, title),
+                )
+                await cur.execute(
+                    f"SELECT session_id, uid, service, env, title, created_at, updated_at "
+                    f"FROM {TABLE} "
+                    "WHERE session_id=%s AND uid=%s AND service=%s AND env=%s",
+                    (session_id, uid, service, env),
+                )
+                row = await cur.fetchone()
+        if row is not None:
+            logger.info("chat_session_claimed", sessionId=session_id, uid=uid, service=service, env=env)
+        return row
+
     async def rename(self, session_id: str, uid: str, title: str) -> bool:
         title = (title or "")[:TITLE_MAX_LEN]
         if not title.strip():

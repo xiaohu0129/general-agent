@@ -69,6 +69,10 @@ class OpenAICompatibleModel(BaseChatModel):
     timeout: float = 60.0
     temperature: float = 0.0  # 默认 0：执行/路由 LLM 确定性优先
     transport: Any = None  # 注入 httpx transport（测试用 MockTransport）
+    # 注入共享 httpx client（app/lifespan 持有并负责关闭，适配层不得关闭）；
+    # 未注入时每次调用按 self.transport 新建（保持测试注入 MockTransport 的既有行为）
+    client: Any = None
+    sync_client: Any = None
 
     _bound_tools: list[dict] = PrivateAttr(default_factory=list)
     _bound_tool_choice: Any = PrivateAttr(default=None)
@@ -179,11 +183,23 @@ class OpenAICompatibleModel(BaseChatModel):
         with tracer.start_as_current_span("llm_call") as span:
             span.set_attribute("model", self.model)
             try:
-                with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
-                    r = client.post(self._endpoint(), json=body, headers=self._headers())
+                owns_client = self.sync_client is None
+                client = self.sync_client or httpx.Client(
+                    transport=self.transport, timeout=self.timeout
+                )
+                try:
+                    r = client.post(
+                        self._endpoint(),
+                        json=body,
+                        headers=self._headers(),
+                        timeout=self.timeout,
+                    )
                     if r.is_error:
                         raise self._http_error(r)
                     data = r.json()
+                finally:
+                    if owns_client:
+                        client.close()
                 ai = self._parse_message(data)
                 usage = ai.usage_metadata or {}
                 observability.record_llm(
@@ -211,8 +227,18 @@ class OpenAICompatibleModel(BaseChatModel):
         with tracer.start_as_current_span("llm_call") as span:
             span.set_attribute("model", self.model)
             try:
-                async with httpx.AsyncClient(transport=self.transport, timeout=self.timeout) as client:
-                    async with client.stream("POST", self._endpoint(), json=body, headers=self._headers()) as r:
+                owns_client = self.client is None
+                client = self.client or httpx.AsyncClient(
+                    transport=self.transport, timeout=self.timeout
+                )
+                try:
+                    async with client.stream(
+                        "POST",
+                        self._endpoint(),
+                        json=body,
+                        headers=self._headers(),
+                        timeout=self.timeout,
+                    ) as r:
                         if r.is_error:
                             await r.aread()
                             raise self._http_error(r)
@@ -223,7 +249,23 @@ class OpenAICompatibleModel(BaseChatModel):
                             payload = line[5:].strip()
                             if payload == "[DONE]":
                                 break
-                            for chunk in self._emit_chunk(json.loads(payload)):
+                            try:
+                                chunk_data = json.loads(payload)
+                            except json.JSONDecodeError:
+                                logger.warning(
+                                    "llm_bad_sse_chunk",
+                                    error="json_decode_failed",
+                                    raw=payload[:200],
+                                )
+                                continue
+                            if not isinstance(chunk_data, dict):
+                                logger.warning(
+                                    "llm_bad_sse_chunk",
+                                    error="unexpected_shape",
+                                    raw=payload[:200],
+                                )
+                                continue
+                            for chunk in self._emit_chunk(chunk_data):
                                 um = getattr(chunk.message, "usage_metadata", None)
                                 if um:
                                     prompt_tokens = um.get("input_tokens", 0)
@@ -232,6 +274,9 @@ class OpenAICompatibleModel(BaseChatModel):
                                 if rm.get("model"):
                                     model_name = rm["model"]
                                 yield chunk
+                finally:
+                    if owns_client:
+                        await client.aclose()
                 observability.record_llm(
                     (time.monotonic() - start) * 1000,
                     model=model_name,

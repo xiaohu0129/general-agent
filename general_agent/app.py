@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -55,6 +57,7 @@ async def _setup_skill_router(app: FastAPI, settings) -> None:
         api_key=emb_cfg.api_key,
         timeout=emb_cfg.timeout,
         batch_size=emb_cfg.batch_size,
+        client=app.state.http_client,
     )
     # embedding 指向 stub（base_url 留空）时检索无语义，仅规则可用 -> 路由自动降级
     is_stub = not emb_cfg.base_url
@@ -137,7 +140,27 @@ def create_app() -> FastAPI:
         await _setup_skill_router(app, settings)
         yield
         observability.shutdown_observability()
+        # 关闭惰性创建的 Redis 客户端（未配置/未初始化时 close_redis 为 no-op），best-effort
+        from .redis_client import close_redis
+
+        try:
+            await close_redis()
+        except Exception as exc:
+            logger.warning("close_redis_failed", error=str(exc))
         # release the lazily-created MySQL pool, if any
+        # 关闭共享出站 HTTP 客户端（LLM/Embedding 复用连接池），best-effort，先于 MySQL 清理
+        sync_http_client = getattr(app.state, "sync_http_client", None)
+        if sync_http_client is not None:
+            try:
+                sync_http_client.close()
+            except Exception as exc:
+                logger.warning("close_http_client_failed", error=str(exc))
+        http_client = getattr(app.state, "http_client", None)
+        if http_client is not None:
+            try:
+                await http_client.aclose()
+            except Exception as exc:
+                logger.warning("close_http_client_failed", error=str(exc))
         from .mysql_client import close_mysql
 
         await close_mysql()
@@ -156,14 +179,30 @@ def create_app() -> FastAPI:
     async def _governance_exc_handler(request: Request, exc: GovernanceError):
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
 
+    # pydantic 请求参数校验失败（body/query/path）统一 400 VALIDATION，
+    # JSON 形状与 GovernanceError 一致（替代 FastAPI 默认 422 detail 列表）
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exc_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=400,
+            content={"code": "VALIDATION", "message": "请求参数校验失败"},
+        )
+
     # LLM：未配置端点时指向本地 stub（:9094），生产改 llm.base_url
     llm_cfg = settings.llm
     base_url = llm_cfg.base_url or "http://localhost:9094"
+    # 出站共享 HTTP 连接池：LLM（async + 经 executor 的 sync _generate）与 Embedding 复用；
+    # 各请求仍传 per-request timeout（embedding 30s / llm 60s）覆盖 client 默认值
+    app.state.http_client = httpx.AsyncClient(timeout=llm_cfg.timeout)
+    app.state.sync_http_client = httpx.Client(timeout=llm_cfg.timeout)
     app.state.model = OpenAICompatibleModel(
         base_url=base_url,
         model=llm_cfg.model,
         api_key=llm_cfg.api_key,
         timeout=llm_cfg.timeout,
+        temperature=llm_cfg.temperature,
+        client=app.state.http_client,
+        sync_client=app.state.sync_http_client,
     )
     # Skill 注册表，按请求 env 重建 agent；业务方在此注册自己的 Skill
     app.state.skill_registry = build_registry()
@@ -185,11 +224,17 @@ def create_app() -> FastAPI:
     app.state.broker = Broker(
         ring_size=settings.broker.ring_size,
         sub_queue_size=settings.broker.sub_queue_size,
+        session_ttl=settings.broker.session_ttl,
     )
     # 内存限流器
     app.state.rate_limiter = TokenBucket(
         rate=settings.security.rate_limit.rps,
         capacity=settings.security.rate_limit.burst,
+    )
+    # 注册接口按 IP 独立限流；enabled=False 时为 None，路由跳过
+    rr_cfg = settings.security.register_rate
+    app.state.register_limiter = (
+        TokenBucket(rate=rr_cfg.rps, capacity=rr_cfg.burst) if rr_cfg.enabled else None
     )
     # producer 任务引用集，防 GC + 便于观测
     app.state.inflight = set()

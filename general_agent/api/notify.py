@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..logging_setup import get_logger
 from ..security import service_auth_dep
@@ -18,10 +18,10 @@ logger = get_logger(__name__)
 
 
 class NotifyBody(BaseModel):
-    sessionId: str
-    taskId: str
-    status: str
-    message: str | None = None
+    sessionId: str = Field(min_length=1)
+    taskId: str = Field(min_length=1)
+    status: str = Field(min_length=1, max_length=32)
+    message: str | None = Field(default=None, max_length=2000)
     traceId: str | None = None
 
 

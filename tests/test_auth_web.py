@@ -10,7 +10,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from general_agent.auth import hash_password, verify_password
+from general_agent.auth import LoginSessionStore, hash_password, verify_password
 from general_agent.config import get_settings
 from general_agent.user_store import UserExistsError
 
@@ -30,9 +30,6 @@ class FakeUserStore:
 
     async def get_by_username(self, username):
         return self.users.get(username)
-
-    async def get_by_uid(self, uid):
-        return next((u for u in self.users.values() if u["uid"] == uid), None)
 
 
 class FakeChatSessions:
@@ -56,6 +53,29 @@ class FakeChatSessions:
     async def get_owned(self, session_id, uid):
         s = self.sessions.get(session_id)
         return s if (s and s["uid"] == uid) else None
+
+    async def get_owned_scoped(self, session_id, service, env, uid):
+        s = self.sessions.get(session_id)
+        if s and s["uid"] == uid and s["service"] == service and s["env"] == env:
+            return s
+        return None
+
+    async def claim_if_absent(self, session_id, service, env, uid, title):
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            if (
+                existing["uid"] == uid
+                and existing["service"] == service
+                and existing["env"] == env
+            ):
+                return existing
+            return None
+        row = {
+            "session_id": session_id, "uid": uid, "service": service, "env": env,
+            "title": (title or "新会话")[:128],
+        }
+        self.sessions[session_id] = row
+        return row
 
     async def rename(self, session_id, uid, title):
         s = self.sessions.get(session_id)
@@ -151,6 +171,33 @@ def test_login_wrong_and_right(web_app):
         assert c.get("/auth/me").status_code == 200
 
 
+def test_login_nonexistent_user_runs_dummy_pbkdf2(web_app, monkeypatch):
+    """防用户枚举时序差：用户不存在也必须执行一次等价 PBKDF2（dummy hash）。"""
+    from general_agent import auth as auth_mod
+
+    called_with: list[str] = []
+    real_verify = auth_mod.verify_password
+
+    def spy(password, stored):
+        # spy 必须包真实函数，不能让真实登录路径的密码校验失效
+        called_with.append(stored)
+        return real_verify(password, stored)
+
+    monkeypatch.setattr(auth_mod, "verify_password", spy)
+    with _client(web_app) as c:
+        _register(c, "bob", "password123")
+        called_with.clear()
+        r = c.post("/auth/login", json={"username": "ghost", "password": "password123"})
+        assert r.status_code == 401
+        assert r.json()["code"] == "INVALID_CREDENTIALS"
+        assert auth_mod._DUMMY_HASH in called_with  # 不存在路径执行了 dummy PBKDF2
+        # spy 包原函数：真实校验路径仍然有效
+        ok = c.post("/auth/login", json={"username": "bob", "password": "password123"})
+        assert ok.status_code == 200
+        bad = c.post("/auth/login", json={"username": "bob", "password": "wrongpass"})
+        assert bad.status_code == 401
+
+
 def test_logout_revokes_session(web_app):
     with _client(web_app) as c:
         _register(c)
@@ -218,3 +265,90 @@ def test_cross_user_access_denied(web_app):
         assert b.patch(f"/sessions/{sid}", json={"title": "x"}).status_code == 404
         assert b.delete(f"/sessions/{sid}").status_code == 404
         assert b.get("/sessions").json()["sessions"] == []
+
+
+# ---------------- 登录失败双维度锁定（ip|username + username） ----------------
+def test_login_lock_username_dimension_across_ips():
+    """同一用户名在 5 个不同 IP 各失败 1 次后，第 6 个新 IP 也被锁（防分布式撞库）。"""
+    store = LoginSessionStore()
+    t = 1000.0
+    for i in range(5):
+        store.record_login_fail(f"10.0.0.{i + 1}", "bob", now=t)
+    assert store.login_locked("10.9.9.9", "bob", now=t) is True
+    # 其他用户名不受牵连
+    assert store.login_locked("10.9.9.9", "carol", now=t) is False
+    # 任一参与撞库的 IP 也被锁
+    assert store.login_locked("10.0.0.1", "bob", now=t) is True
+
+
+def test_login_lock_ip_dimension_still_works():
+    """原 ip|username 维度行为不变：同 IP 同用户名 5 次失败后锁定。"""
+    store = LoginSessionStore()
+    for i in range(5):
+        store.record_login_fail("10.0.0.1", "bob", now=1000.0 + i)
+    assert store.login_locked("10.0.0.1", "bob", now=1005.0) is True
+
+
+def test_clear_login_fails_clears_both_dimensions():
+    """登录成功清两维：username 维度清空后新 IP 可再登录。"""
+    store = LoginSessionStore()
+    t = 1000.0
+    for i in range(5):
+        store.record_login_fail(f"10.0.0.{i + 1}", "bob", now=t)
+    assert store.login_locked("10.9.9.9", "bob", now=t) is True
+    store.clear_login_fails("10.0.0.1", "bob")
+    assert store.login_locked("10.9.9.9", "bob", now=t) is False
+    assert store.login_locked("10.0.0.1", "bob", now=t) is False
+
+
+def test_login_lock_username_window_expires():
+    """新维度窗口过期自动解锁。"""
+    store = LoginSessionStore()
+    for i in range(5):
+        store.record_login_fail(f"10.0.0.{i + 1}", "bob", now=1000.0)
+    assert store.login_locked("10.9.9.9", "bob", now=1600.5) is False
+    assert "bob" not in store._login_user_fails
+
+
+def test_purge_expired_clears_both_fail_dicts():
+    """_purge_expired 同时清扫两个失败计数 dict。"""
+    store = LoginSessionStore()
+    for i in range(3):
+        store.record_login_fail(f"10.0.0.{i + 1}", "bob", now=1000.0)
+    store.create("u1", "x", now=2000.0)  # 超窗 600s，触发清扫
+    assert store._login_fails == {}
+    assert store._login_user_fails == {}
+
+
+# ---------------- 注册按 IP 限流 ----------------
+def test_register_rate_settings_defaults():
+    from general_agent.config import SecuritySettings
+
+    rr = SecuritySettings().register_rate
+    assert rr.enabled is True
+    assert rr.rps == pytest.approx(10 / 60)
+    assert rr.burst == 5
+
+
+def test_register_rate_limited_by_ip(web_app):
+    """同 IP 超过突发上限：429 RATE_LIMIT，不建用户、不发 cookie。"""
+    from general_agent.security import TokenBucket
+
+    web_app.state.register_limiter = TokenBucket(rate=0.0, capacity=2)
+    with _client(web_app) as c:
+        assert _register(c, "u1").status_code == 200
+        assert _register(c, "u2").status_code == 200
+        r = _register(c, "u3")
+        assert r.status_code == 429
+        assert r.json()["code"] == "RATE_LIMIT"
+        assert "ga_session" not in r.cookies
+    assert len(web_app.state.user_store.users) == 2
+
+
+def test_register_rate_limit_disabled(web_app):
+    """register_limiter 为 None（enabled=False）时不限流。"""
+    web_app.state.register_limiter = None
+    with _client(web_app) as c:
+        for i in range(7):
+            assert _register(c, f"user{i}").status_code == 200
+    assert len(web_app.state.user_store.users) == 7

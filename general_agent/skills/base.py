@@ -7,6 +7,7 @@ SkillRegistry 显式注册，按 env 过滤后产出 LangChain StructuredTool（
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +19,8 @@ from .. import observability
 from ..logging_setup import get_logger
 
 logger = get_logger(__name__)
+
+SKILL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _make_missing_args_handler(args_schema: type[BaseModel] | None):
@@ -127,6 +130,13 @@ class SkillRegistry:
         self._skills: list[Skill] = []
 
     def register(self, skill: Skill) -> None:
+        name = skill.name
+        if not isinstance(name, str) or not SKILL_NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                f"非法 Skill 名称 {name!r}：必须非空且匹配 ^[A-Za-z0-9_-]{{1,64}}$"
+            )
+        if any(s.name == name for s in self._skills):
+            raise ValueError(f"Skill 名称 {name!r} 重复注册：注册范围内名称必须唯一")
         self._skills.append(skill)
 
     def get_tools(self, ctx: SkillContext, arg_guard: bool = True) -> list[BaseTool]:

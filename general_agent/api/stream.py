@@ -30,12 +30,19 @@ async def stream(
 ):
     broker: Broker = request.app.state.broker
     settings = get_settings()
+    chat_sessions = request.app.state.chat_sessions
 
-    # session 模式：订阅前做会话归属校验，越权/不存在 -> 404
+    # 所有模式订阅前做会话归属校验（建流前抛出，越权/不存在统一 404，不暴露存在性）：
+    # session 模式按登录 uid（web 固定 service/env，行为不变）；
+    # api_key/disabled 按 (service, env, user) 四元组。
     if settings.security.auth_mode == "session":
-        owned = await request.app.state.chat_sessions.get_owned(sessionId, identity.user)
-        if owned is None:
-            raise GovernanceError(404, "SESSION_NOT_FOUND", "会话不存在")
+        owned = await chat_sessions.get_owned(sessionId, identity.user)
+    else:
+        owned = await chat_sessions.get_owned_scoped(
+            sessionId, identity.service, identity.env, identity.user
+        )
+    if owned is None:
+        raise GovernanceError(404, "SESSION_NOT_FOUND", "会话不存在")
 
     heartbeat = settings.broker.heartbeat_interval
 

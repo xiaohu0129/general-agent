@@ -619,3 +619,131 @@ describe("ChatPage 会话级缺口检测与静默重拉合并", () => {
     expect(screen.queryByRole("button", { name: "加载更早的消息" })).toBeNull();
   });
 });
+
+describe("ChatPage 缺口提示 3 秒自动消失（fake timers，11.4）", () => {
+  type FakeConn = (typeof streamState.connections)[number];
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  beforeEach(() => {
+    vi.mocked(sessionsApi.listSessions).mockResolvedValue([
+      { sessionId: SID, title: "售后会话", createdAt: null, updatedAt: null },
+    ]);
+    mockedListMessages.mockResolvedValue(page([]));
+  });
+
+  async function flushMicrotasks() {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  // 挂载/打开会话用真实时钟（findByWaitFor 依赖真实轮询）；打开完成后再切
+  // fake timers，使缺口重拉设置的 setTimeout 受虚拟时钟控制。
+  async function mountAndOpen() {
+    const utils = render(<ChatPage />);
+    fireEvent.click(await screen.findByText("售后会话"));
+    await waitFor(() => expect(mockedCreateStream).toHaveBeenCalled());
+    vi.useFakeTimers();
+    return {
+      ...utils,
+      conn: streamState.connections[streamState.connections.length - 1] as FakeConn,
+    };
+  }
+
+  function pushStreamGap(conn: FakeConn, lowSeq: number, highSeq: number) {
+    act(() => {
+      conn.handlers.onEvent(
+        ev("turn_delta", { turnId: "t-a", traceId: TRACE, content: "x", eventSeq: lowSeq }),
+      );
+      conn.handlers.onEvent(
+        ev("turn_delta", { turnId: "t-b", traceId: TRACE, content: "y", eventSeq: highSeq }),
+      );
+    });
+  }
+
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  it("N1 重拉成功提示出现，3 秒整自动消失；2999ms 仍在", async () => {
+    const { conn } = await mountAndOpen();
+
+    pushStreamGap(conn, 10, 13);
+    await flushMicrotasks();
+
+    expect(screen.getByRole("status")).toHaveTextContent(GAP_NOTICE);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await advance(2999);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    await advance(1);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("N2 连续重拉重置计时：不叠 timer，旧 timer 不会提前关掉新提示", async () => {
+    const { conn } = await mountAndOpen();
+
+    pushStreamGap(conn, 10, 13);
+    await flushMicrotasks();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    // 第一次提示 2.9s 后第二次缺口重拉（水位 13 → 20）
+    await advance(2900);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    pushStreamGap(conn, 20, 23);
+    await flushMicrotasks();
+    // 始终只有一个在计时的 timer
+    expect(vi.getTimerCount()).toBe(1);
+
+    // 若旧 timer 未被重置，3000ms 处就会错误清空新提示
+    await advance(200);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    await advance(2799);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    await advance(1);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("N3 切换会话：提示立即清空、timer 立即清除，推进时钟不再出现", async () => {
+    vi.mocked(sessionsApi.listSessions).mockResolvedValue([
+      { sessionId: SID, title: "售后会话", createdAt: null, updatedAt: null },
+      { sessionId: SID2, title: "第二个会话", createdAt: null, updatedAt: null },
+    ]);
+    const { conn } = await mountAndOpen();
+
+    pushStreamGap(conn, 10, 13);
+    await flushMicrotasks();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    mockedListMessages.mockResolvedValueOnce(page([]));
+    fireEvent.click(screen.getByText("第二个会话"));
+    await flushMicrotasks();
+
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    await advance(10_000);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("N4 组件卸载：timer 被清理，推进时钟无遗留回调、不抛错", async () => {
+    const { unmount, conn } = await mountAndOpen();
+
+    pushStreamGap(conn, 10, 13);
+    await flushMicrotasks();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(1);
+
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});

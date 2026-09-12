@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatEvent } from "../api/types";
 import { applyEvent, type ApplyContext } from "./applyEvent";
 import type { ChatMessage } from "./model";
-import { createEventGate, type SequencedEvent } from "./eventGate";
+import { createEventGate, SEEN_LRU_CAPACITY, type SequencedEvent } from "./eventGate";
 
 function seq(turnId: string | null | undefined, eventSeq: number | null | undefined): SequencedEvent {
   return { data: { turnId, eventSeq } };
@@ -152,5 +152,94 @@ describe("eventGate 会话级高水位缺口检测", () => {
     expect(gate.maxSeenSeq).toBeNull();
     expect(gate.ingest(seq("t1", 1), "stream")).toEqual({ apply: true, gap: false });
     expect(gate.maxSeenSeq).toBe(1);
+  });
+});
+
+describe("eventGate gap 只由 stream 通道产生（11.2）", () => {
+  it("P1 post 通道 seq 1→4 跳变：gap 恒 false，但仍推进水位到 4，重复键 apply=false", () => {
+    const gate = createEventGate();
+    expect(gate.ingest(seq("t1", 1), "post")).toEqual({ apply: true, gap: false });
+    expect(gate.ingest(seq("t2", 4), "post")).toEqual({ apply: true, gap: false });
+    expect(gate.maxSeenSeq).toBe(4);
+    // post 通道仍正常去重
+    expect(gate.ingest(seq("t2", 4), "post")).toEqual({ apply: false, gap: false });
+    expect(gate.ingest(seq("t2", 4), "stream")).toEqual({ apply: false, gap: false });
+  });
+
+  it("P2 stream 通道 1→4 跳变仍 gap=true（对照）", () => {
+    const gate = createEventGate();
+    gate.ingest(seq("t1", 1), "stream");
+    expect(gate.ingest(seq("t2", 4), "stream")).toEqual({ apply: true, gap: true });
+  });
+
+  it("P3 post 推进水位后 stream 连续 seq 不报 gap；stream 再跳变才报", () => {
+    const gate = createEventGate();
+    // post 即时流自身跳变不报缺口
+    gate.ingest(seq("t1", 1), "post");
+    expect(gate.ingest(seq("t2", 4), "post").gap).toBe(false);
+    // stream 从 post 水位之后连续到达：不报
+    expect(gate.ingest(seq("t3", 5), "stream")).toEqual({ apply: true, gap: false });
+    // stream 自己跳变（缺 6）才报
+    expect(gate.ingest(seq("t4", 7), "stream")).toEqual({ apply: true, gap: true });
+  });
+
+  it("P4 post 大跳变建立高水位后，stream 首个滞后事件不乱报（首基线语义不被通道破坏）", () => {
+    const gate = createEventGate();
+    expect(gate.ingest(seq("t1", 100), "post")).toEqual({ apply: true, gap: false });
+    expect(gate.maxSeenSeq).toBe(100);
+    expect(gate.ingest(seq("t2", 50), "stream")).toEqual({ apply: true, gap: false });
+  });
+});
+
+describe("eventGate seen 有界 LRU（11.3，容量 2000，按插入序淘汰）", () => {
+  it("L1 灌入超容量个不同键：最旧键被淘汰可再次 apply，容量内键与最新键仍去重", () => {
+    const gate = createEventGate();
+    for (let i = 0; i < SEEN_LRU_CAPACITY; i++) {
+      expect(gate.ingest(seq(`t${i}`, 1), "post").apply).toBe(true);
+    }
+    // 第 2001 个新键：放行并挤掉最旧的 t0
+    expect(gate.ingest(seq(`t${SEEN_LRU_CAPACITY}`, 1), "post")).toEqual({
+      apply: true,
+      gap: false,
+    });
+
+    // 次旧 t1 仍在容量内：重复被拦截
+    expect(gate.ingest(seq("t1", 1), "stream").apply).toBe(false);
+    // 最新键自身重复：两通道均拦截
+    expect(gate.ingest(seq(`t${SEEN_LRU_CAPACITY}`, 1), "post").apply).toBe(false);
+    // 最旧 t0 已淘汰：旧事件再次到达按新事件放行（迟到乱序不重复报 gap）
+    expect(gate.ingest(seq("t0", 1), "stream")).toEqual({ apply: true, gap: false });
+    // t0 重新记忆后再次到达：拦截
+    expect(gate.ingest(seq("t0", 1), "post").apply).toBe(false);
+  });
+
+  it("L2 重复命中不改变插入序淘汰语义：容量打满后最旧键照样淘汰", () => {
+    const gate = createEventGate();
+    for (let i = 0; i < SEEN_LRU_CAPACITY; i++) {
+      gate.ingest(seq(`t${i}`, 1), "post");
+    }
+    // 对中间键反复重复命中（apply=false），不刷新其插入位置
+    for (let k = 0; k < 5; k++) {
+      expect(gate.ingest(seq("t1000", 1), "post").apply).toBe(false);
+    }
+    // 再来一个新键挤掉 t0
+    gate.ingest(seq(`t${SEEN_LRU_CAPACITY}`, 1), "post");
+    expect(gate.ingest(seq("t0", 1), "post").apply).toBe(true);
+    // t1000 仍在容量内，继续被去重
+    expect(gate.ingest(seq("t1000", 1), "post").apply).toBe(false);
+  });
+
+  it("L3 无 seq 防御分支不进 LRU、不占容量", () => {
+    const gate = createEventGate();
+    for (let i = 0; i < SEEN_LRU_CAPACITY + 10; i++) {
+      gate.ingest(seq("post-only", undefined), "post");
+    }
+    // 全部容量仍留给有 seq 的键：第 2001 个有 seq 新键才开始淘汰
+    for (let i = 0; i < SEEN_LRU_CAPACITY; i++) {
+      expect(gate.ingest(seq(`s${i}`, 9), "post").apply).toBe(true);
+    }
+    expect(gate.ingest(seq("s0", 9), "stream").apply).toBe(false);
+    gate.ingest(seq(`s${SEEN_LRU_CAPACITY}`, 9), "post");
+    expect(gate.ingest(seq("s0", 9), "stream").apply).toBe(true);
   });
 });

@@ -162,9 +162,6 @@ class _FakeUserStore:
     async def get_by_username(self, username):
         return self.users.get(username)
 
-    async def get_by_uid(self, uid):
-        return next((u for u in self.users.values() if u["uid"] == uid), None)
-
 
 class _FakeChatSessions:
     def __init__(self):
@@ -184,6 +181,29 @@ class _FakeChatSessions:
     async def get_owned(self, session_id, uid):
         s = self.sessions.get(session_id)
         return s if (s and s["uid"] == uid) else None
+
+    async def get_owned_scoped(self, session_id, service, env, uid):
+        s = self.sessions.get(session_id)
+        if s and s["uid"] == uid and s["service"] == service and s["env"] == env:
+            return s
+        return None
+
+    async def claim_if_absent(self, session_id, service, env, uid, title):
+        existing = self.sessions.get(session_id)
+        if existing is not None:
+            if (
+                existing["uid"] == uid
+                and existing["service"] == service
+                and existing["env"] == env
+            ):
+                return existing
+            return None
+        row = {
+            "session_id": session_id, "uid": uid, "service": service, "env": env,
+            "title": (title or "新会话")[:128],
+        }
+        self.sessions[session_id] = row
+        return row
 
     async def rename(self, session_id, uid, title):
         s = self.sessions.get(session_id)

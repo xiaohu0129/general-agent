@@ -32,6 +32,23 @@ def _detect_kind(content: str) -> tuple[str, str]:
     return "text", ".txt"
 
 
+def _tool_status(content: str) -> str:
+    """tool 行历史回放状态：内容解析为 JSON 对象且 errorCode 为非空字符串 -> error，否则 success。
+
+    工具错误结果落库形态见 agent._tool_error_handler / skills.base（{"errorCode": ..., "message": ...}）；
+    解析失败、非对象 JSON、errorCode 空串/null 一律按 success（无法判定失败时不误导前端）。
+    """
+    try:
+        payload = json.loads((content or "").strip())
+    except Exception:
+        return "success"
+    if isinstance(payload, dict):
+        code = payload.get("errorCode")
+        if isinstance(code, str) and code.strip():
+            return "error"
+    return "success"
+
+
 class MessageStore:
     """MySQL 消息历史。可注入 pool/blob_store 以便测试，默认用 get_mysql()/配置。"""
 
@@ -289,19 +306,12 @@ class MessageStore:
                     "contentRef": r.get("content_ref"),
                     "contentSize": r.get("content_size"),
                     "contentKind": r.get("content_kind"),
+                    "status": _tool_status(r.get("content") or "") if r.get("role") == "tool" else None,
                     "options": (meta or {}).get("options"),
                     "selected": (meta or {}).get("selected"),
                 }
             )
         return {"messages": messages, "nextCursor": next_cursor, "hasMore": has_more}
-
-    async def delete_older_than(self, days: int) -> int:
-        pool = await self._pool_obj()
-        sql = f"DELETE FROM {TABLE} WHERE created_at < (NOW() - INTERVAL %s DAY)"
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, (days,))
-                return cur.rowcount
 
     async def list_artifact_refs(
         self, service: str, env: str, user_id: str, session_id: str

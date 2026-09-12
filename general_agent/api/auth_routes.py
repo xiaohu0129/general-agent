@@ -2,7 +2,8 @@
 
 - 密码仅以 PBKDF2 哈希存储；登录成功下发 HttpOnly + SameSite=Lax cookie；
 - 用户不存在与密码错误统一返回 401 INVALID_CREDENTIALS（防用户枚举）；
-- 登录失败按 IP+用户名限流（5 次/10 分钟）；
+- 登录失败按 "IP+用户名" 与 "用户名" 双维度限流（各 5 次/10 分钟，任一命中即锁）；
+- 注册按客户端 IP 限流（security.register_rate，超限 429 RATE_LIMIT）。
 - /auth/* 不走 governance_dep（未登录），/auth/me 自行校验 cookie。
 """
 from __future__ import annotations
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
 from .. import auth as auth_mod
+from .. import observability
 from ..config import get_settings
 from ..logging_setup import get_logger
 from ..security import (
@@ -41,6 +43,13 @@ def _user_store(request: Request) -> UserStore:
 @router.post("/register")
 async def register(body: AuthRequest, request: Request, response: Response) -> dict:
     settings = get_settings()
+    # 按客户端 IP 限流（独立于对话令牌桶）；取令牌在凭据校验/建用户之前，超限不建用户、不发 cookie
+    ip = _client_ip(request)
+    limiter = getattr(request.app.state, "register_limiter", None)
+    if limiter is not None and not limiter.allow(ip):
+        observability.record_rate_limit_hit(settings.security.web.env)
+        audit("register_rate_limited", actor=ip, env=settings.security.web.env, resource=ip)
+        raise GovernanceError(429, "RATE_LIMIT", "rate limit exceeded")
     err = auth_mod.validate_credentials(body.username, body.password)
     if err:
         raise GovernanceError(400, "VALIDATION", err)
@@ -74,7 +83,13 @@ async def login(body: AuthRequest, request: Request, response: Response) -> dict
 
     store = _user_store(request)
     user = await store.get_by_username(body.username)
-    if user is None or not auth_mod.verify_password(body.password, user["password_hash"]):
+    if user is None:
+        # 用户不存在也执行一次等价 PBKDF2（结果忽略），使两种失败路径耗时不可区分
+        auth_mod.verify_password(body.password, auth_mod._DUMMY_HASH)
+        password_ok = False
+    else:
+        password_ok = auth_mod.verify_password(body.password, user["password_hash"])
+    if user is None or not password_ok:
         sessions.record_login_fail(ip, body.username)
         audit("login_failed", actor=body.username, env=settings.security.web.env, resource=ip)
         raise GovernanceError(401, "INVALID_CREDENTIALS", "用户名或密码错误")

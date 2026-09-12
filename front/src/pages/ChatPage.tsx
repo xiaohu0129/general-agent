@@ -19,6 +19,9 @@ import Welcome from "../components/Welcome";
 import { useAuth } from "../state/auth-context";
 import "./ChatPage.css";
 
+// 缺口重拉成功提示的停留时长：到时自动消失；连续重拉会重置计时
+const GAP_NOTICE_TTL_MS = 3000;
+
 // /stream 连接承载组件：随会话挂载/卸载（条件渲染），sid 变化时 cleanup 后重建。
 // 独立成组件而非内联 effect：null 会话期根本不挂载；StrictMode 双挂载也能真实
 // 演练 setup→cleanup→setup，保证不会泄漏 EventSource 连接。
@@ -72,6 +75,8 @@ export default function ChatPage() {
   const pendingGapRef = useRef<string | null>(null);
   // 重拉幂等守卫：连续多个缺口事件/挂账收尾只允许一次在途请求
   const gapReloadingRef = useRef(false);
+  // 缺口提示自动消失计时器：showGapNotice 重置式设置，切会话/卸载时清理
+  const gapNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 当前会话 id 的 ref 镜像：异步回调里丢弃已切走会话的陈旧事件/响应
   const currentSidRef = useRef<string | null>(null);
   // 事件去重门按 sessionId 持有：切会话不共享游标
@@ -85,6 +90,30 @@ export default function ChatPage() {
     }
     return gate;
   }, []);
+
+  const clearGapNoticeTimer = useCallback(() => {
+    if (gapNoticeTimerRef.current !== null) {
+      clearTimeout(gapNoticeTimerRef.current);
+      gapNoticeTimerRef.current = null;
+    }
+  }, []);
+
+  // 重置式展示缺口提示：先清旧 timer 再排新 timer，连续重拉不叠加计时；
+  // TTL 到点自动清空提示。切会话/卸载由 clearGapNoticeTimer 收口。
+  const showGapNotice = useCallback(
+    (text: string) => {
+      clearGapNoticeTimer();
+      setGapNotice(text);
+      gapNoticeTimerRef.current = setTimeout(() => {
+        gapNoticeTimerRef.current = null;
+        setGapNotice(null);
+      }, GAP_NOTICE_TTL_MS);
+    },
+    [clearGapNoticeTimer],
+  );
+
+  // 卸载时清 timer，避免卸载后 setState
+  useEffect(() => clearGapNoticeTimer, [clearGapNoticeTimer]);
 
   // 静默历史重拉合并（缺口恢复）：独立于 openSession——不 abort 即时流、不整体
   // 替换 messages、不 setCurrent、不清输入框。历史按 turnId 替换/转正 live 气泡，
@@ -121,7 +150,7 @@ export default function ChatPage() {
                 (m.turnId === undefined || !restoredTurnIds.has(m.turnId)),
             ),
           ]);
-          setGapNotice("事件已过期，已刷新");
+          showGapNotice("事件已过期，已刷新");
         } while (pendingGapRef.current === sid);
       } catch (err) {
         if (sid !== currentSidRef.current) return;
@@ -133,7 +162,7 @@ export default function ChatPage() {
         gapReloadingRef.current = false;
       }
     },
-    [],
+    [showGapNotice],
   );
 
   // 缺口调度：活动轮中只挂账（不动消息、不发请求），收尾后由 dispatchEvent 补拉；
@@ -224,6 +253,7 @@ export default function ChatPage() {
     gatesRef.current.clear();
     pendingGapRef.current = null;
     gapReloadingRef.current = false;
+    clearGapNoticeTimer();
     setGapNotice(null);
     setCurrent(s);
     earlierCursor.current = null;
@@ -239,7 +269,7 @@ export default function ChatPage() {
       }
       setMessages([]);
     }
-  }, [logout]);
+  }, [logout, clearGapNoticeTimer]);
 
   const loadEarlier = useCallback(async () => {
     if (!current || loadingEarlier || earlierCursor.current == null) return;
@@ -264,12 +294,13 @@ export default function ChatPage() {
     gatesRef.current.clear();
     pendingGapRef.current = null;
     gapReloadingRef.current = false;
+    clearGapNoticeTimer();
     setGapNotice(null);
     setCurrent(null);
     setMessages([]);
     earlierCursor.current = null;
     setHasEarlier(false);
-  }, []);
+  }, [clearGapNoticeTimer]);
 
   const send = useCallback(
     async (text: string, clarifySelection?: string) => {

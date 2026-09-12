@@ -98,6 +98,9 @@ export interface HistoryMessage {
     arguments?: string | Record<string, unknown>;
   }> | null;
   toolCallId?: string | null;
+  // tool 行的执行结果状态（U11a）：仅 role="tool" 行可能为 success/error，
+  // 其余行恒为 null；旧数据缺字段时前端按 success 兜底
+  status?: "success" | "error" | null;
   createdAt: string | null;
   // 大产物外置（Tier2）：非空表示正文已外置 blob，content 仅为 head 摘要
   contentRef?: string | null;
